@@ -51,15 +51,3 @@ No Blueprint hooks are used, so it isn't affected by
 
 Colors are in `CONFIG` at the top of `main.lua` (scene) and `CFG` at the top of `ui.lua` (UI), in
 linear RGB. Set `ui = false` in `main.lua` to only darken the backdrop.
-
-## Repo layout
-
-- `mod/DarkMode` – the mod
-- `dev/` – development tooling (not needed to play):
-  - `DarkModeDev` – loader mod that hot-reloads `dev/live.lua` (checked every 30 frames) and calls its
-    `tick()` every frame. `live.lua` is the UI engine under development; `mod/DarkMode/Scripts/ui.lua` is
-    a copy of it.
-  - `DarkProbe` – read-only probe that dumps on-screen widget trees, colors, brushes and materials
-  - `tools/` – keyboard driving (`keys.ps1`, `shot.sh`, `tour.sh`), window screenshots, brightness
-    measurement, contact sheets, game restart
-- `docs/FINDINGS.md` – how the scene and UI are built, the engine's rules, UE4SS pitfalls
