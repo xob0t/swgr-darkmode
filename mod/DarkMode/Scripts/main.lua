@@ -112,10 +112,16 @@ if CONFIG.ui then
     if loaded and type(UI) == "table" and UI.tick then
         local uictx = { state = {}, reloaded = true, dev = false }
         local lastErr
-        LoopInGameThreadWithDelay(500, function()
+        local function step()
             local s, e = pcall(UI.tick, uictx)
             if not s and e ~= lastErr then lastErr = e; log("ui error: " .. tostring(e)) end
-        end)
+        end
+        -- ui.lua time-slices its own work (about 2 ms per frame at most), so it wants a per-frame tick
+        if type(LoopInGameThreadAfterFrames) == "function" then
+            LoopInGameThreadAfterFrames(1, step)
+        else
+            LoopInGameThreadWithDelay(16, step)
+        end
     else
         log("ui.lua failed to load: " .. tostring(UI))
     end

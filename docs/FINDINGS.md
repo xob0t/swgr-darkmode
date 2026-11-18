@@ -50,11 +50,60 @@ Variants tried (screenshots in `docs/img`):
   or UI color-scheme assets in the pak index, and no UI theme option in `GameUserSettings.ini`.
 - UI material parameter collections: only HUD ones (`MPC_HUD_Colors`, `MPC_HUD_Parameters`) and
   `MPC_UI_CommonParametters` (no colors).
+- The CommonUI text style classes (`BP_Style_*`) already use cream/white. Dark text comes from
+  per-widget `ColorAndOpacity`, `Border.ContentColorAndOpacity` tint wrappers (`B_TextTint`), and the
+  rich-text tables (`DT_RichText_Body`, `_Body_Dark_Italic`, `_Body_Map`, `_Display_A`).
+
+## UI rule engine (`ui.lua`)
+
+There is no global palette, so the mod recolors by **component type**, never by menu. Every on-screen
+root (`WBP_*` in the viewport) is walked, and what's behind each widget is tracked
+(Overlay paint order, Border backgrounds):
+
+| Component | Detected by | Becomes |
+|---|---|---|
+| paper panel | Image/Border, light + unsaturated, resource or widget name looks like a panel (`Squircle`, `Pill`, `Backing`, `TileButton`, `_Fill`, `Grunge`, `Img_Tile_Base`, `Img_Backer`, ...) | dark panel |
+| screen layer | widget name `Background`/`Vignette`/`ColorFill`/..., resource `Vignette`/`Gradient`/`Blur`; counts even at low alpha (scrims) | dark if light |
+| outline | `Stroke`/`Outline`, light + unsaturated | muted outline |
+| decor | `Deco`, `Swoop`, `Line`, `Dial`, `Barcode`, title graphics | untouched; never a background |
+| artwork | thumbnails, portraits, icons, textures, colored panels | untouched; text on it untouched |
+| text | `TextBlock` color too dark on a dark/darkened background | cream |
+| tint wrapper | `Border.ContentColorAndOpacity` / `UserWidget.ColorAndOpacity` too dark | cream |
+| rich text | `RichTextBlock.DefaultTextStyle` too dark | `SetDefaultColorAndOpacity(cream)` |
+
+Details that mattered:
+
+- List and tile views (`ListViewBase`) generate their entries: walk `GetDisplayedEntryWidgets()`.
+- `RetainerBox` caches its content in a render target. Call `RequestRender()` after recoloring inside it.
+- The card frames on Logbook/Parts are the `Img_Tile_Stroke*` outline images, not the grunge fill.
+- "Background" in a *texture* name is not a backdrop: `T_UI_Insignia_Background_*` are player banners.
+- The game re-sets some colors on hover/state changes, so known targets are re-applied every 10 frames.
+
+Performance: cost is dominated by reflection calls. Type facts are cached per class and names per
+object address. Root candidates are the top-level UserWidgets, recorded through `NotifyOnNewObject`
+(widgets whose outer isn't a `WidgetTree`), with an occasional full `FindAllOf` reseed. A cycle (roots,
+walk, merge, apply) is time-sliced over frames with a 1 ms budget. Main menu: about 28 ms of work per
+cycle, spread over about 15 frames, max about 3 ms in one frame, every about 90 frames, and sooner when
+new widgets are created. Before these optimizations a single walk was about 190 ms on the game thread.
 
 ## UE4SS notes
 
 - Blueprint `RegisterHook` does not work in this game (ProcessLocalScriptFunction is inlined),
-  so everything is polled with `LoopInGameThreadWithDelay` and applied idempotently.
+  so everything is polled from frame/timer loops and applied idempotently.
+- UE4SS can't call into the engine from Lua **coroutines** ("lua state has no instance"). Use explicit
+  work stacks for time slicing.
+- UE4SS returns a new Lua userdata per object access, so key tables by `obj:GetAddress()`, not by the
+  userdata.
+- `IsA("/Script/...")` with a string path is slow; resolve the UClass once with `StaticFindObject`.
 - Iterating every `Actor` and touching components caused crashes. Iterate specific classes
   (`StaticMeshActor`, ...) and check `IsValid()` before each step.
 - `ExecuteConsoleCommand` `ShowFlag.*` toggles were unreliable for testing; use component visibility.
+
+## Screens checked (dark, readable)
+
+Main menu (Campaign, Scenarios, Arcade, Multiplayer tabs), Settings (all six tabs), Logbook (Main,
+Parts, Abilities), Scenario details, Arcade event details, Customize, Customize Vehicle / Edit Vehicle,
+Customize Player Banner, Party panel, Quit and Exit dialogs, and in the campaign hub: Pause, Build, Map.
+
+Not checked: race loading screens, the in-race HUD/pause and post-race results (starting a race would
+change campaign or arcade stats), online multiplayer lobbies.
