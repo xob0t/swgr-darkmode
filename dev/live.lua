@@ -379,6 +379,36 @@ local function add(out, kind, w, addr, rb)
     end
 end
 
+-- Rich text tag styles (bold, emphasis, ...) come from the block's style DataTable
+-- (FRichTextStyleRow.TextStyle). Near-black rows were meant for the light panels: lighten them in the
+-- table itself, once per table, then make blocks that already built their styles rebuild them.
+-- Colored rows (gold highlights) are kept. Only tables of blocks we walk (menus) are touched.
+DARKMODE_STYLE_TABLES = DARKMODE_STYLE_TABLES or {}   -- table address -> { name, changed }
+DARKMODE_RICH_DONE = DARKMODE_RICH_DONE or {}         -- block address -> table address it was refreshed for
+local function patch_style_table(t)
+    local a = addr_of(t)
+    if not a then return false end
+    local nm = short(t)
+    local rec = DARKMODE_STYLE_TABLES[a]
+    if rec and rec.name == nm then return rec.changed > 0 end
+    rec = { name = nm, changed = 0 }
+    DARKMODE_STYLE_TABLES[a] = rec
+    ok(function()
+        t:ForEachRow(function(_, row)
+            pcall(function()
+                local col = row.TextStyle.ColorAndOpacity
+                local c = col.SpecifiedColor
+                if c and dark_tint(c) then
+                    col.SpecifiedColor = cream(c.A)
+                    rec.changed = rec.changed + 1
+                end
+            end)
+        end)
+    end)
+    if DEV then log(string.format("style table %s: %d dark rows lightened", nm, rec.changed)) end
+    return rec.changed > 0
+end
+
 -- One task = one widget plus the context it inherits:
 --   bg   = what is drawn behind it (nil = backdrop, which is dark after the scene/vignette fixes)
 --   tint = inherited color multiplier (Border.ContentColorAndOpacity, UserWidget.ColorAndOpacity)
@@ -421,6 +451,16 @@ local function process(t, out, push)
         if c and too_dark(c) and on_dark(bg) then
             add(out, "rich", w, F.addr, rb)
             if DEV then out.log[#out.log + 1] = "RICH    " .. path .. " " .. fmt(c) end
+        end
+        local ts = on_dark(bg) and ok(function() return w.TextStyleSet end)
+        if valid(ts) and patch_style_table(ts) and F.addr then
+            local ta = addr_of(ts)
+            if DARKMODE_RICH_DONE[F.addr] ~= ta then
+                DARKMODE_RICH_DONE[F.addr] = ta
+                -- SetTextStyleSet skips the rebuild for the same table: clear it and set it again
+                pcall(function() w:SetTextStyleSet(nil); w:SetTextStyleSet(ts) end)
+                if rb then out.retainers[#out.retainers + 1] = rb end
+            end
         end
         return
     end

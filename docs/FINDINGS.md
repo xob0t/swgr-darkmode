@@ -94,6 +94,12 @@ Details that mattered:
   background counts, not earlier layers of the same component (a card's fill on its own base).
   Panels darkened earlier (or via a patched template) are recognized by color and re-shaded, and the
   learned entry is updated (later lines in `learned.txt` win).
+- **Rich text tag styles.** Bold/emphasis runs (`<Bold>...`) take their color from the block's style
+  DataTable (`FRichTextStyleRow.TextStyle`), not from `DefaultTextStyle`. Near-black rows are lightened
+  in the table itself (UE4SS `DataTable:ForEachRow` hands out rows by reference), once per table and
+  only for tables of blocks the walk reaches (menus, not the HUD). Blocks that already built their
+  styles are refreshed with `SetTextStyleSet(nil)` + `SetTextStyleSet(table)` (the same table is a
+  no-op). Seen: `DT_RichText_Bootflow` (photosensitivity warning), `DT_RichText_Display_A`.
 - **Tint wrappers dim artwork too.** Locked cards set `B_ImageTint`'s content tint to grey (0.30) to dim
   their art; lifting it to cream washed them out. Only near-black tints (text) are lightened.
 
