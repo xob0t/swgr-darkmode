@@ -80,14 +80,53 @@ Details that mattered:
 - `RetainerBox` caches its content in a render target. Call `RequestRender()` after recoloring inside it.
 - The card frames on Logbook/Parts are the `Img_Tile_Stroke*` outline images, not the grunge fill.
 - "Background" in a *texture* name is not a backdrop: `T_UI_Insignia_Background_*` are player banners.
-- The game re-sets some colors on hover/state changes, so known targets are re-applied every 10 frames.
+- Blank keyboard key caps (`T_UI_Cntrl_*Blank*`, used for letter keys such as C) are drawn as an image
+  plus a text letter; they become a cream cap with a dark letter, matching the textured input icons
+  (whose glyphs are cut-outs that show the darkened bar, about sRGB 60).
+
+### Getting the colors in before the first frame
+
+A scan pass only runs every ~90 frames (sooner when widgets are created) and takes ~15 frames, so
+anything it fixes is visible in its original white first. Three mechanisms remove that:
+
+1. **Template learning.** A UserWidget's tree is copied from its class's template tree
+   (`<class>:WidgetTree.<name>`) when it initializes. Every recolor decision is also recorded for the
+   template it came from (`learned.txt`, shipped with ~160 entries from a menu tour, extended at
+   runtime), and a class's learned templates are patched from the `NotifyOnNewObject` callback,
+   before the new instance copies them. Screens then come up dark from their first frame.
+   - A widget class that inherits another widget Blueprint without its own tree uses its parent's tree
+     (`WBP_PausePaddock_C` → `WBP_Pause_C`). Walk `GetSuperStruct()` to the class that owns one.
+   - The CDO/archetype flags check (`HasAnyFlags(CDO | Archetype | NeedLoad | WasLoaded)`) keeps the
+     callback away from objects being loaded.
+2. **Setter hooks.** Hover/focus states and reactivated screens recolor widgets at runtime through the
+   native setters (`TextBlock/Image/UserWidget:SetColorAndOpacity`, `Border:SetBrushColor`,
+   `SetContentColorAndOpacity`, `RichTextBlock:SetDefaultColorAndOpacity`). Native `RegisterHook`
+   works for these (also when called from Blueprints), and a post-hook re-applies our color in the same
+   frame for known targets and learned templates. About 40 calls/s in menus, ~1/s in gameplay.
+   Re-applying is conditional on the new color (only light+grey panels are darkened, only too-dark
+   text is lightened), so the game's accent and highlight colors pass through.
+3. **Keeping targets** across screens until the next GC (CommonUI keeps deactivated screens around).
+
+UMG animations write properties through native C++ setters, not the hookable UFunctions, and they run
+after the mod's tick. `WBP_Background_Blur`'s `Anim_In` only animates `BlurStrength` and the tint's
+`RenderOpacity`, so it's harmless once the tint itself is dark.
+
+CommonUI creates a new pause screen (`WBP_PausePaddock_C_<n>`) every time you come back from the Logbook
+or Settings; with the template patched it is dark from its first frame.
 
 Performance: cost is dominated by reflection calls. Type facts are cached per class and names per
 object address. Root candidates are the top-level UserWidgets, recorded through `NotifyOnNewObject`
-(widgets whose outer isn't a `WidgetTree`), with an occasional full `FindAllOf` reseed. A cycle (roots,
-walk, merge, apply) is time-sliced over frames with a 1 ms budget. Main menu: about 28 ms of work per
-cycle, spread over about 15 frames, max about 3 ms in one frame, every about 90 frames, and sooner when
-new widgets are created. Before these optimizations a single walk was about 190 ms on the game thread.
+(widgets whose outer isn't a `WidgetTree`), seeded once with `FindAllOf`. A cycle (roots, walk, merge,
+apply) is time-sliced over frames with a 1 ms budget. Measured in the hub: ~0.1 ms per frame on
+average, 3-6 ms worst single frame. Before the optimizations a single walk was about 190 ms.
+
+- `StaticFindObject` and `FindFirstOf`/`FindAllOf` scan the whole object array in this game (UE4SS
+  logs "FUObjectHashTables unavailable"): 2 ms per hit, 8.6 ms per miss, 10 ms per `FindFirstOf`. Never
+  call them in a loop; cache what they return and re-check it with `IsValid()`.
+- This game garbage-collects every ~10 s. Freed addresses are reused right away by new objects, often
+  of the same class, so address-keyed caches (names, class facts, targets) must be dropped after a GC.
+  A canary object (`StaticConstructObject` of a plain `Object`, unreferenced) tells us when one ran:
+  `IsValid()` on it turns false.
 
 ## UE4SS notes
 
@@ -101,8 +140,10 @@ new widgets are created. Before these optimizations a single walk was about 190 
     `if outer then outer:GetClass()` reads address 0x10.
   - Anything kept from an earlier frame may have been destroyed (a time-sliced cycle spans ~15 frames,
     and a level change can happen in between). `IsValid()` does track garbage collection correctly.
-- `NotifyOnNewObject` callbacks run inside object construction: only queue the object there and
-  inspect it later from the tick.
+- `NotifyOnNewObject` callbacks run inside object construction (on the game thread; UE4SS queues ones
+  from other threads). Keep them short and check every object with `IsValid()`.
+- Native `RegisterHook` (UFunctions implemented in C++) works, including when Blueprints call them.
+- A callback that returns `true` unregisters itself (`NotifyOnNewObject`).
 - UE4SS returns a new Lua userdata per object access, so key tables by `obj:GetAddress()`, not by the
   userdata.
 - `IsA("/Script/...")` with a string path is slow; resolve the UClass once with `StaticFindObject`.
@@ -115,8 +156,9 @@ new widgets are created. Before these optimizations a single walk was about 190 
 Main menu (Campaign, Scenarios, Arcade, Multiplayer tabs), Settings (all six tabs), Logbook (Main,
 Parts, Abilities), Scenario details, Arcade event details, Customize, Customize Vehicle / Edit Vehicle,
 Customize Player Banner, Party panel, Quit and Exit dialogs, and in the campaign hub: Pause, Build, Map,
-Exit to Main Menu dialog. Button-hint bars on all of these. Continue Campaign / Exit to Main Menu round
-trips (4x) without crashes.
+Exit to Main Menu dialog, Hibi's Shop (garage) and its upgrade picker. Button-hint bars on all of these.
+Continue Campaign / Exit to Main Menu round trips (4x) without crashes. Logbook/Settings → Pause and
+gameplay → Pause recorded at 30 fps with no light frames.
 
 Not checked: race loading screens, the in-race HUD/pause and post-race results (starting a race would
 change campaign or arcade stats), online multiplayer lobbies.

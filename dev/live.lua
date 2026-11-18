@@ -18,6 +18,9 @@ local CFG = {
     panel = { R = 0.034, G = 0.037, B = 0.040 },      -- linear; replaces paper panels (alpha kept)
     outline = { R = 0.090, G = 0.095, B = 0.100 },    -- replaces light outlines/strokes
     text = { R = 0.78, G = 0.73, B = 0.67 },          -- the game's own cream text color
+    -- letters on light keyboard key caps. The textured input icons have cut-out glyphs that show the
+    -- darkened hint bar through them (about sRGB 60), so the letters use that, not black.
+    keytext = { R = 0.045, G = 0.042, B = 0.039 },
     dark_luma = 0.12,                                 -- text/panels darker than this are "dark"
     paper_luma = 0.30,                                -- panels lighter than this and unsaturated are "paper"
     paper_sat = 0.15,
@@ -121,6 +124,33 @@ local function facts(w)
     return f
 end
 
+-- Everything above is keyed by object address. After a garbage collection, freed addresses get reused
+-- by new objects (often of the same class), so cached names/kinds would describe the wrong object.
+-- A canary object that only GC can delete tells us when that happened.
+-- (StaticFindObject/FindFirstOf scan the whole object array in this game: 2-10 ms each. Look up the
+-- engine and the base class once.)
+local function new_canary()
+    DARKMODE_CANARY = nil
+    pcall(function()
+        if not valid(DARKMODE_ENGINE) then DARKMODE_ENGINE = FindFirstOf("GameEngine") end
+        local base = uclass("/Script/CoreUObject.Object")
+        DARKMODE_CANARY_N = (DARKMODE_CANARY_N or 0) + 1
+        DARKMODE_CANARY = StaticConstructObject(base, DARKMODE_ENGINE, FName("DarkModeCanary_" .. DARKMODE_CANARY_N))
+    end)
+end
+DARKMODE_GC_EPOCH = DARKMODE_GC_EPOCH or 0
+local function forget_addresses()
+    CLASSF, FACTS, FACT_N, RESNAME, RES_N = {}, {}, 0, {}, 0
+    DARKMODE_GC_EPOCH = DARKMODE_GC_EPOCH + 1
+end
+-- true when a GC ran since the last call (the first call only sets up the canary)
+local function gc_ran()
+    if DARKMODE_CANARY ~= nil and valid(DARKMODE_CANARY) then return false end
+    local had = DARKMODE_CANARY ~= nil
+    new_canary()
+    return had
+end
+
 local function resname_of(res)
     if res == nil then return "" end
     local a = addr_of(res)
@@ -160,6 +190,11 @@ local function classify(brush, color, wname, opacity)
         return "backdrop", c, resname, light
     end
     if c.A < 0.35 then return nil end
+    -- blank keyboard key caps (the key letter is a text drawn on top): light cap, dark letter, like
+    -- the textured input icons. Classified by resource, whatever color they currently have.
+    if resname:find("T_UI_Cntrl_", 1, true) and resname:find("Blank", 1, true) then
+        return "keycap", c, resname, l < CFG.paper_luma
+    end
     if any(wname, DECOR) or any(resname, DECOR) then return "decor", c, resname end
     if any(wname, OUTLINE) or any(resname, OUTLINE) then return "outline", c, resname, light end
     if l < CFG.dark_luma then return "dark", c, resname end
@@ -174,9 +209,151 @@ end
 ---------------------------------------------------------------------------------------------------
 local DEV = true            -- debug strings only in dev
 
+---------------------------------------------------------------------------------------------------
+-- template learning: a UserWidget's tree is copied from its class's template tree
+-- (<class path>:WidgetTree.<widget name>) when the widget initializes. Every recolor decision is also
+-- recorded for the template it came from (saved to learned.txt), and a class's learned templates are
+-- patched when its first instance is created, before that instance copies them. Screens then come up
+-- dark from their first frame instead of flashing white until a scan cycle catches up.
+-- Templates are reached by walking class.WidgetTree (StaticFindObject scans every object here).
+---------------------------------------------------------------------------------------------------
+local APPLY                 -- defined below (apply section)
+local LEARN_FILE = (function()
+    local src = debug.getinfo(1, "S").source or ""
+    local dir = src:match("^@(.*[/\\])")         -- shipped: next to ui.lua
+    return (dir or CFG.dev_out) .. "learned.txt"  -- dev: live.lua is loaded from a string
+end)()
+-- global (survives dev hot reloads): by[class path][widget name] = kind, n[class path] = count
+DARKMODE_LEARN = DARKMODE_LEARN or nil
+local function learned()
+    local LL = DARKMODE_LEARN
+    if LL then return LL end
+    LL = { by = {}, n = {}, fresh = {}, dirty = {} }
+    local f = io.open(LEARN_FILE, "r")
+    if f then
+        for line in f:lines() do
+            local k, cp, name = line:match("^(%w+)\t(%S+):WidgetTree%.(%S+)$")
+            if k then
+                local e = LL.by[cp] or {}; LL.by[cp] = e
+                if not e[name] then e[name] = k; LL.n[cp] = (LL.n[cp] or 0) + 1 end
+            end
+        end
+        f:close()
+    end
+    DARKMODE_LEARN = LL
+    return LL
+end
+
+-- per class address: { path, epoch, done = learned entries already applied, map = name -> template }
+DARKMODE_TPLCLS = DARKMODE_TPLCLS or {}
+local function class_path(cls) return full(cls):match("^%S+ (/.+)$") end
+local function class_info(cls)
+    local a = addr_of(cls)
+    if not a then return nil end
+    local ci = DARKMODE_TPLCLS[a]
+    if ci and ci.epoch ~= DARKMODE_GC_EPOCH then
+        -- after a GC the address may belong to another (or a reloaded) class: re-check, re-walk
+        if class_path(cls) ~= ci.path then ci = nil else ci.epoch, ci.map, ci.done = DARKMODE_GC_EPOCH, nil, 0 end
+    end
+    if not ci then
+        local p = class_path(cls)
+        if not p then return nil end
+        ci = { path = p, epoch = DARKMODE_GC_EPOCH, done = 0 }
+        DARKMODE_TPLCLS[a] = ci
+    end
+    return ci
+end
+
+local function template_map(ci, cls)
+    if ci.map then return ci.map end
+    local map, stack, guard = {}, {}, 0
+    -- a widget class that inherits another widget Blueprint without adding its own tree uses its
+    -- parent's tree (UE's FindWidgetTreeOwningClass), so walk up to the class that owns one
+    local c, root = cls, nil
+    for _ = 1, 10 do
+        root = ok(function() return c.WidgetTree.RootWidget end)
+        if valid(root) then break end
+        c = ok(function() return c:GetSuperStruct() end)
+        if not valid(c) then break end
+    end
+    stack[1] = root
+    while #stack > 0 and guard < 4000 do
+        guard = guard + 1
+        local w = stack[#stack]; stack[#stack] = nil
+        if valid(w) then
+            map[short(w)] = w
+            local n = ok(function() return w:GetChildrenCount() end) or 0
+            for i = 0, n - 1 do stack[#stack + 1] = ok(function() return w:GetChildAt(i) end) end
+            -- content placed into a child UserWidget's named slot belongs to this class's tree
+            ok(function() w.NamedSlotBindings:ForEach(function(_, b) stack[#stack + 1] = b:get().Content end) end)
+        end
+    end
+    ci.map = map
+    return map
+end
+
+local function patch_class(cls)
+    local ci = class_info(cls)
+    if not ci then return end
+    local LL = learned()
+    local n = LL.n[ci.path] or 0
+    if n == 0 or ci.done == n then return end
+    local map = template_map(ci, cls)
+    for name, kind in pairs(LL.by[ci.path]) do
+        local t = map[name]
+        if t and valid(t) and APPLY[kind] then pcall(APPLY[kind], t) end
+    end
+    ci.done = n
+end
+
+-- called for every new UserWidget (NotifyOnNewObject), before it initializes its tree
+local function on_new(o)
+    -- skip CDOs, archetypes and objects being loaded (those can be created off the game thread)
+    local s, skip = pcall(function() return o:HasAnyFlags(0x10 | 0x20 | 0x400 | 0x80000) end)
+    if not s or skip then return end
+    local cls = ok(function() return o:GetClass() end)
+    if valid(cls) then patch_class(cls) end
+end
+
+-- (timed: this runs inside object construction, outside the per-frame budget)
+PERF = PERF or { tick = 0, tick_max = 0, cb = 0, cb_n = 0, frames = 0 }
+DARKMODE_ON_NEW = function(o)
+    local t0 = os.clock()
+    on_new(o)
+    local dt = os.clock() - t0
+    PERF.cb = PERF.cb + dt; PERF.cb_n = PERF.cb_n + 1
+end
+
+-- the template a widget instance came from: its outer is a WidgetTree whose outer is the UserWidget
+local function template_owner(w, F)
+    if F.tplc ~= nil then return F.tplc, F.tplp end
+    F.tplc = false
+    local wt = ok(function() return w:GetOuter() end)
+    if valid(wt) and classname(wt) == "WidgetTree" then
+        local uw = ok(function() return wt:GetOuter() end)
+        local cls = valid(uw) and ok(function() return uw:GetClass() end)
+        local cp = valid(cls) and class_path(cls)
+        if cp and F.name ~= "?" then F.tplc, F.tplp = cls, cp end
+    end
+    return F.tplc, F.tplp
+end
+
 -- targets are keyed by object address (UE4SS hands out a new Lua wrapper per access)
 local function add(out, kind, w, addr, rb)
-    if addr then out[kind][addr] = { obj = w, rb = rb } end
+    if not addr then return end
+    out[kind][addr] = { obj = w, rb = rb }
+    local F = FACTS[addr]
+    if not F then return end
+    local cls, cp = template_owner(w, F)
+    if cls then
+        local LL = learned()
+        local e = LL.by[cp] or {}; LL.by[cp] = e
+        if not e[F.name] then
+            e[F.name] = kind; LL.n[cp] = (LL.n[cp] or 0) + 1
+            LL.fresh[#LL.fresh + 1] = kind .. "\t" .. cp .. ":WidgetTree." .. F.name
+            LL.dirty[cp] = cls
+        end
+    end
 end
 
 -- One task = one widget plus the context it inherits:
@@ -198,6 +375,14 @@ local function process(t, out, push)
         if DEV then
             local txt = ok(function() return w:GetText():ToString() end) or ""
             out.tree[#out.tree + 1] = ind .. "T " .. n .. " " .. fmt(c) .. " eff=" .. fmt(c and mul(c, tint)) .. " bg=" .. tostring(bg or "backdrop") .. ' "' .. txt:sub(1, 40):gsub("%c", " ") .. '"'
+        end
+        -- a key letter on a (lightened) key cap
+        if bg == "keycap" then
+            if c and not near(c.R, CFG.keytext.R) then
+                add(out, "keytext", w, F.addr, rb)
+                if DEV then out.log[#out.log + 1] = "KEYTEXT " .. path .. " " .. fmt(c) end
+            end
+            return
         end
         -- only fix the text itself when its own color is the dark part (dark tints are fixed at the tint)
         if c and too_dark(c) and on_dark(bg) then
@@ -286,7 +471,7 @@ local function process(t, out, push)
                         out.tree[#out.tree + 1] = ind .. " I " .. cname .. " " .. tostring(kind) .. (darken and "*" or "") .. " " .. fmt(c) .. " " .. tostring(res) .. " " .. sz
                     end
                     if darken then
-                        add(out, kind == "outline" and "outlines" or "images", child, CF.addr, childRb)
+                        add(out, kind == "outline" and "outlines" or kind == "keycap" and "keycaps" or "images", child, CF.addr, childRb)
                         if DEV then out.log[#out.log + 1] = "IMAGE   " .. path .. "/" .. cname .. " " .. fmt(c) .. " " .. res end
                     end
                     if kind and cf.overlay and kind ~= "outline" and kind ~= "decor" then
@@ -301,7 +486,7 @@ local function process(t, out, push)
     for i = #later, 1, -1 do push(later[i]) end   -- reversed so the stack pops them in order
 end
 
-local KINDS = { "images", "outlines", "borders", "text", "contents", "uwtints", "rich" }
+local KINDS = { "images", "outlines", "keycaps", "borders", "text", "keytext", "contents", "uwtints", "rich" }
 local function new_out()
     local o = { retainers = {}, log = {}, tree = {} }
     for _, k in ipairs(KINDS) do o[k] = {} end
@@ -375,16 +560,27 @@ end
 -- apply
 ---------------------------------------------------------------------------------------------------
 -- Each returns true when it actually changed something (so cached RetainerBoxes can be re-rendered).
-local function paint(img, col)
+-- Recolors are conditional on the current color, not just "not ours yet": the same widget gets other
+-- colors from the game (accents, highlights, hover states) that must pass through untouched.
+local function is_paper(c) return luma(c) > CFG.paper_luma and sat(c) < CFG.paper_sat end
+local function paint(img, col, cond)
     local c = ok(function() return img.ColorAndOpacity end)
-    if c and not near(c.R, col.R) then img:SetColorAndOpacity({ R = col.R, G = col.G, B = col.B, A = c.A }); return true end
+    if c and not near(c.R, col.R) and cond(c) then img:SetColorAndOpacity({ R = col.R, G = col.G, B = col.B, A = c.A }); return true end
 end
-local APPLY = {
-    images = function(w) return paint(w, CFG.panel) end,
-    outlines = function(w) return paint(w, CFG.outline) end,
+APPLY = {
+    images = function(w) return paint(w, CFG.panel, is_paper) end,
+    outlines = function(w) return paint(w, CFG.outline, is_paper) end,
+    keycaps = function(w) return paint(w, CFG.text, function(c) return luma(c) < CFG.paper_luma end) end,
+    keytext = function(t)
+        local c = ok(function() return t.ColorAndOpacity.SpecifiedColor end)
+        if c and not near(c.R, CFG.keytext.R) then
+            t:SetColorAndOpacity({ SpecifiedColor = { R = CFG.keytext.R, G = CFG.keytext.G, B = CFG.keytext.B, A = c.A }, ColorUseRule = 0 })
+            return true
+        end
+    end,
     borders = function(b)
         local c = ok(function() return b.BrushColor end)
-        if c and not near(c.R, CFG.panel.R) then b:SetBrushColor({ R = CFG.panel.R, G = CFG.panel.G, B = CFG.panel.B, A = c.A }); return true end
+        if c and not near(c.R, CFG.panel.R) and is_paper(c) then b:SetBrushColor({ R = CFG.panel.R, G = CFG.panel.G, B = CFG.panel.B, A = c.A }); return true end
     end,
     text = function(t)
         local c = ok(function() return t.ColorAndOpacity.SpecifiedColor end)
@@ -424,6 +620,69 @@ end
 
 local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
 
+local function save_learned()
+    local LL = learned()
+    if #LL.fresh == 0 then return end
+    local f = io.open(LEARN_FILE, "a")
+    if f then f:write(table.concat(LL.fresh, "\n"), "\n"); f:close() end
+    LL.fresh = {}
+end
+
+---------------------------------------------------------------------------------------------------
+-- setter hooks: the game recolors widgets at runtime (hover/focus states, screen intro animations,
+-- reactivated screens). Those go through these native setters (also when called from Blueprints or
+-- UMG animations), so a post-hook re-applies our color in the same frame, before anything is drawn.
+-- Only widgets we know are touched: current targets, or instances of a learned template.
+---------------------------------------------------------------------------------------------------
+local CUR_ST                -- the tick's state (targets)
+local SETTERS = {
+    { "/Script/UMG.TextBlock:SetColorAndOpacity", { "text", "keytext" } },
+    { "/Script/UMG.Image:SetColorAndOpacity", { "images", "outlines", "keycaps" } },
+    { "/Script/UMG.Border:SetBrushColor", { "borders" } },
+    { "/Script/UMG.Border:SetContentColorAndOpacity", { "contents" } },
+    { "/Script/UMG.UserWidget:SetColorAndOpacity", { "uwtints" } },
+    { "/Script/UMG.RichTextBlock:SetDefaultColorAndOpacity", { "rich" } },
+}
+local in_set = false
+local function on_set(kinds, ctx)
+    if in_set then return end          -- our own Set* calls
+    local w = ok(function() return ctx:get() end)
+    if not valid(w) then return end
+    local F = facts(w)
+    local kind
+    local tg = CUR_ST and CUR_ST.targets
+    if tg and F.addr then
+        for _, k in ipairs(kinds) do if tg[k][F.addr] then kind = k; break end end
+    end
+    if not kind then
+        local cls, cp = template_owner(w, F)
+        local lk = cls and learned().by[cp]
+        lk = lk and lk[F.name]
+        if lk then for _, k in ipairs(kinds) do if k == lk then kind = k; break end end end
+    end
+    if kind then
+        in_set = true
+        pcall(APPLY[kind], w)
+        in_set = false
+    end
+end
+DARKMODE_ON_SET = function(kinds, ctx)
+    local t0 = os.clock()
+    on_set(kinds, ctx)
+    PERF.set = (PERF.set or 0) + (os.clock() - t0); PERF.set_n = (PERF.set_n or 0) + 1
+end
+local function register_setter_hooks()
+    if DARKMODE_HOOKED or type(RegisterHook) ~= "function" then return end
+    DARKMODE_HOOKED = true   -- global: once per Lua state; the callbacks go through DARKMODE_ON_SET
+    for _, s in ipairs(SETTERS) do
+        local kinds = s[2]
+        local okr, err = pcall(RegisterHook, s[1], function() end, function(ctx)
+            if DARKMODE_ON_SET then pcall(DARKMODE_ON_SET, kinds, ctx) end
+        end)
+        if not okr then log("hook failed: " .. s[1] .. " " .. tostring(err)) end
+    end
+end
+
 ---------------------------------------------------------------------------------------------------
 -- tick (called every frame by the host)
 ---------------------------------------------------------------------------------------------------
@@ -432,19 +691,22 @@ local function finish(ctx, st, res)
     if DEV then
         local req = io.open(CFG.dev_out .. "dump.req", "r")
         if req then req:close(); os.remove(CFG.dev_out .. "dump.req") end
-        if key ~= st.key or req then
+        if req or (key ~= st.key and st.frame - (st.last_dump or -1e9) > 300) then
+            st.last_dump = st.frame
             log(string.format("%d roots: %d panels + %d borders + %d outlines, %d texts, %d rich, %d content tints, %d widget tints",
                 #res.list, count(out.images), count(out.borders), count(out.outlines), count(out.text), count(out.rich), count(out.contents), count(out.uwtints)))
             local f = io.open(CFG.debug_file, "a")
             if f then f:write("== ", key, "\n", table.concat(out.log, "\n"), "\n"); f:close() end
             DARKMODE_SCREEN_N = (DARKMODE_SCREEN_N or 0) + 1
-            local g = io.open(string.format("%sscreens/%03d.txt", CFG.dev_out, DARKMODE_SCREEN_N), "w")
+            DARKMODE_SESSION = DARKMODE_SESSION or os.date("%m%d_%H%M%S")   -- per game launch: no overwrites
+            local g = io.open(string.format("%sscreens/%s_%03d.txt", CFG.dev_out, DARKMODE_SESSION, DARKMODE_SCREEN_N), "w")
             if g then g:write("screens: ", key, "\n", table.concat(out.tree, "\n"), "\n"); g:close() end
             log("screen dump " .. DARKMODE_SCREEN_N)
         end
     end
-    -- keep earlier targets on the same screen set (once recolored they no longer classify as targets)
-    if st.targets and key == st.key then
+    -- keep earlier targets (once recolored they no longer classify as targets), also from screens that
+    -- are not showing now: CommonUI reuses deactivated screens (pause menu under settings). A GC clears them.
+    if st.targets then
         for _, k in ipairs(KINDS) do
             for a, e in pairs(st.targets[k]) do
                 if out[k][a] == nil and valid(e.obj) then out[k][a] = e end
@@ -453,6 +715,7 @@ local function finish(ctx, st, res)
     end
     st.key, st.targets = key, out
     apply(out)
+    save_learned()
     -- retainer boxes cache their content; refresh them once per cycle so earlier changes show
     -- (the cycle spanned several frames: anything collected may have been destroyed since)
     for _, rb in ipairs(out.retainers) do
@@ -460,11 +723,20 @@ local function finish(ctx, st, res)
     end
 end
 
-function M.tick(ctx)
+local function tick_body(ctx)
     if ctx.reloaded then ctx.reloaded = false; ctx.state = { frame = 0 } end
     local st = ctx.state
     st.frame = st.frame + 1
+    CUR_ST = st
     DEV = ctx.dev ~= false and not CFG.force_prod
+    TAG = DEV and "[DarkModeDev] " or "[DarkMode] "
+    register_setter_hooks()
+    if not DARKMODE_LEARN_LOGGED then
+        DARKMODE_LEARN_LOGGED = true
+        local n = 0
+        for _, c in pairs(learned().n) do n = n + c end
+        log(string.format("%d learned templates (%s)", n, LEARN_FILE))
+    end
     TAG = DEV and "[DarkModeDev] " or "[DarkMode] "
 
     -- dev only: one-shot experiments (out/exp.lua is run once with helpers, then deleted)
@@ -481,6 +753,15 @@ function M.tick(ctx)
         end
     end
 
+    -- garbage collection: address-keyed caches and held objects are no longer trustworthy
+    if gc_ran() or st.frame == st.gc_again then
+        if st.frame ~= st.gc_again then st.gc_again = st.frame + 30 end   -- purging can span frames
+        forget_addresses()
+        st.co, st.targets, st.key = nil, nil, nil
+        st.next_scan = math.min(st.next_scan or 0, st.frame + 2)
+        if DEV then log("gc: caches dropped") end
+    end
+
     -- scan cycle, time-sliced
     -- new widgets were created (a screen opened): start a cycle now instead of waiting
     if not DARKMODE_NOTIFY and type(NotifyOnNewObject) == "function" then
@@ -490,12 +771,14 @@ function M.tick(ctx)
             DARKMODE_DIRTY = true
             local q = DARKMODE_NEW
             if #q < 20000 then q[#q + 1] = o end
+            if DARKMODE_ON_NEW then pcall(DARKMODE_ON_NEW, o) end
         end)
     end
     if DARKMODE_DIRTY and not st.co then DARKMODE_DIRTY = false; st.next_scan = math.min(st.next_scan or 0, math.max(st.frame + 2, (st.last_end or 0) + 15)) end
     if not st.co and st.frame >= (st.next_scan or 0) then
         local t0 = os.clock()
-        st.co = new_cycle((st.cycles or 0) % 30 == 0)   -- full FindAllOf reseed occasionally
+        -- FindAllOf scans every object (one long frame): only seed once, new widgets come from NotifyOnNewObject
+        st.co = new_cycle(st.cycles == nil)
         st.cycle_ms, st.cycle_slices = (os.clock() - t0) * 1000, 0
     end
     if st.co then
@@ -519,10 +802,33 @@ function M.tick(ctx)
         end
     end
 
+    -- classes that learned something new: patch their templates now
+    local LL = learned()
+    if next(LL.dirty) then
+        local d = LL.dirty; LL.dirty = {}
+        for _, cls in pairs(d) do if valid(cls) then pcall(patch_class, cls) end end
+    end
+
     -- keep known targets recolored (the game resets colors on hover/state changes)
     if st.targets and not st.co and st.frame % CFG.apply_every == 0 then
         local s, e = pcall(apply, st.targets)
         if not s then log("apply error: " .. tostring(e)) end
+    end
+end
+
+function M.tick(ctx)
+    local t0 = os.clock()
+    tick_body(ctx)
+    local dt = os.clock() - t0
+    PERF.tick = PERF.tick + dt; PERF.frames = PERF.frames + 1
+    if dt > PERF.tick_max then PERF.tick_max = dt end
+    if PERF.frames >= 300 then
+        if ctx.dev ~= false then
+            log(string.format("perf: tick avg %.2f ms max %.1f ms; new-widget callbacks %d, %.2f ms/frame; setter hooks %d, %.2f ms/frame",
+                PERF.tick * 1000 / PERF.frames, PERF.tick_max * 1000, PERF.cb_n, PERF.cb * 1000 / PERF.frames,
+                PERF.set_n or 0, (PERF.set or 0) * 1000 / PERF.frames))
+        end
+        PERF.tick, PERF.tick_max, PERF.cb, PERF.cb_n, PERF.frames, PERF.set, PERF.set_n = 0, 0, 0, 0, 0, 0, 0
     end
 end
 

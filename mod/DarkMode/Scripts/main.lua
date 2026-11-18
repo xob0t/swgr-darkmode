@@ -40,10 +40,16 @@ local PARAM = nil              -- FName("Param"), created lazily on the game thr
 local scene = nil              -- cached objects for the currently loaded front-end world
 local sun_orig = {}            -- original sun intensity per component full name
 
+-- FindFirstOf scans every object (~10 ms here), so keep the controller and world and only look
+-- them up again once they are gone (level change)
+local pc_cached, world_cached, world_is_fe = nil, nil, false
 local function in_front_end()
-    local pc = FindFirstOf("PlayerController")
-    local w = valid(pc) and ok(function() return pc:GetWorld() end)
-    return valid(w) and full(w):find("/L_FrontEnd.", 1, true) ~= nil
+    if not valid(pc_cached) then pc_cached = FindFirstOf("PlayerController"); world_cached = nil end
+    if not valid(world_cached) then
+        world_cached = valid(pc_cached) and ok(function() return pc_cached:GetWorld() end) or nil
+        world_is_fe = valid(world_cached) and full(world_cached):find("/L_FrontEnd.", 1, true) ~= nil
+    end
+    return world_is_fe
 end
 
 local function mid_for(comp, slot)

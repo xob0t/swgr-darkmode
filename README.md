@@ -37,8 +37,12 @@ level. The mod tints that set instead of removing it (removing it leaves black h
 per menu. Light "paper" panels, tile and card bases, scrims and vignettes become dark. Light outlines
 become muted. Dark text, dark tint wrappers and dark rich text on those surfaces become the game's own
 cream text color. Artwork, thumbnails, icons, decoration and colored panels are left alone. The work is
-time-sliced over frames (about 1 ms per frame), so it doesn't cause hitches. See
-[docs/FINDINGS.md](docs/FINDINGS.md) for the rules and the screens that were checked.
+time-sliced over frames (about 0.1 ms per frame on average), so it doesn't cause hitches.
+
+To avoid a white flash when a screen opens, every decision is also applied to the widget class's
+template (recorded in `Scripts/learned.txt`, which ships with ~160 entries and grows as you play), and
+the game's runtime color changes (hover, focus, reactivated screens) are caught by hooks on the UMG
+color setters. See [docs/FINDINGS.md](docs/FINDINGS.md) for the rules and the screens that were checked.
 
 No Blueprint hooks are used, so it isn't affected by
 [UE4SS #1503](https://github.com/UE4SS-RE/RE-UE4SS/issues/1503). The in-race HUD is not touched.
