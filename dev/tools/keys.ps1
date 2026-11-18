@@ -31,7 +31,7 @@ $p = Get-Process $Proc -ErrorAction Stop | Where-Object { $_.MainWindowHandle -n
 [KB]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero); [KB]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
 [KB]::ShowWindow($p.MainWindowHandle, 9) | Out-Null
 [KB]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
-Start-Sleep -Milliseconds 300
+Start-Sleep -Milliseconds 900
 foreach ($k in ($Keys -split ",")) {
   $name, $count = $k -split "\*"; if (-not $count) { $count = 1 }
   if (-not $map.ContainsKey($name)) { Write-Error "unknown key $name"; continue }

@@ -24,7 +24,7 @@ local PANEL_MATERIAL = { "Squircle", "Pill", "Backing", "Backer", "Panel", "Bann
 local PANEL_WIDGET = { "Img_Tile_Base", "Img_Tile_Fill", "Img_Backer", "Img_Backing", "Img_Base", "Img_Fill", "Img_Panel" }
 -- screen-level decoration: never counts as "art" behind text; darkened if light
 local BACKDROP_RES = { "Vignette", "Gradient", "Background", "Blur", "Fade" }
-local BACKDROP_NAME = { "Vignette", "Background", "Gradient", "Blur" }
+local BACKDROP_NAME = { "Vignette", "Background", "Gradient", "Blur", "ColorFill", "Scrim", "Overlay_Tint" }
 local SKIP_NAME = { "Icn", "Icon", "Shadow", "Glow", "Pulse", "MinSize", "Insignia", "Flash", "Portrait", "Avatar" }
 -- outlines around components: light ones become a muted outline color; never a "background"
 local OUTLINE = { "Stroke", "Outline" }
@@ -57,15 +57,17 @@ local function classify(brush, color, wname, opacity)
     local drawAs = ok(function() return brush.DrawAs end)
     if drawAs == 0 or not tint or not color then return nil end
     local c = { R = tint.R * color.R, G = tint.G * color.G, B = tint.B * color.B, A = tint.A * color.A * (opacity or 1) }
-    if c.A < 0.35 then return nil end
     local res = ok(function() return brush.ResourceObject end)
     local resname = valid(res) and short(res) or ""
     local l = luma(c)
+    -- screen-level layers (scrims, vignettes) matter even when quite transparent
+    if any(resname, BACKDROP_RES) or any(wname, BACKDROP_NAME) then
+        if c.A < 0.08 then return nil end
+        return "backdrop", c, resname, l > CFG.paper_luma and sat(c) < CFG.paper_sat
+    end
+    if c.A < 0.35 then return nil end
     if any(wname, OUTLINE) or any(resname, OUTLINE) then
         return "outline", c, resname, l > CFG.paper_luma and sat(c) < CFG.paper_sat
-    end
-    if any(resname, BACKDROP_RES) or any(wname, BACKDROP_NAME) then
-        return "backdrop", c, resname, l > CFG.paper_luma and sat(c) < CFG.paper_sat
     end
     local panel = resname == "" or any(resname, PANEL_MATERIAL) or any(wname, PANEL_WIDGET)
     if l < CFG.dark_luma then return "dark", c, resname end
