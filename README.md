@@ -23,14 +23,16 @@ that weren't tested should be covered too.
 
 ## Requirements
 
-- STAR WARS Galactic Racer on Steam
-- [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS/releases) v4.0.0 with the Galactic Racer signatures. The
-  game isn't supported by stock UE4SS yet, so copy the
-  [`UE4SS_Signatures` folder](https://github.com/xob0t/RE-UE4SS/tree/add-star-wars-galactic-racer-config/assets/CustomGameConfigs/Star%20Wars%20Galactic%20Racer)
-  next to `UE4SS.dll` ([UE4SS PR #1502](https://github.com/UE4SS-RE/RE-UE4SS/pull/1502)).
+STAR WARS Galactic Racer on Steam, plus UE4SS. Either of these works:
 
-[UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2), a UE4SS fork on
-Nexus Mods, might also work, but it hasn't been tested with this mod.
+- **[UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2)** (Nexus Mods,
+  a UE4SS fork for this game). The easiest option until the official release supports the game: extract
+  it into `STAR WARS Galactic Racer\Griffin\Binaries\Win64`.
+- **Official [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS/releases) v4.0.0** with the Galactic Racer
+  signatures: copy the
+  [`UE4SS_Signatures` folder](https://github.com/xob0t/RE-UE4SS/tree/add-star-wars-galactic-racer-config/assets/CustomGameConfigs/Star%20Wars%20Galactic%20Racer)
+  next to `UE4SS.dll`. Once [UE4SS PR #1502](https://github.com/UE4SS-RE/RE-UE4SS/pull/1502) is merged and
+  released, this step goes away.
 
 ## Install
 
