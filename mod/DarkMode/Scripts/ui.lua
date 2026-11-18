@@ -23,9 +23,9 @@ local PANEL_MATERIAL = { "Squircle", "Pill", "Backing", "Backer", "Panel", "Bann
 -- widget names that mean "this image is the base/backing of a component"
 local PANEL_WIDGET = { "Img_Tile_Base", "Img_Tile_Fill", "Img_Backer", "Img_Backing", "Img_Base", "Img_Fill", "Img_Panel" }
 -- screen-level decoration: never counts as "art" behind text; darkened if light
-local BACKDROP_RES = { "Vignette", "Gradient", "Background", "Blur", "Fade" }
+local BACKDROP_RES = { "Vignette", "Gradient", "Blur", "Fade" }   -- resource names; "Background" is only trusted on widget names (textures like T_UI_Insignia_Background_* are artwork)
 local BACKDROP_NAME = { "Vignette", "Background", "Gradient", "Blur", "ColorFill", "Scrim", "Overlay_Tint" }
-local SKIP_NAME = { "Icn", "Icon", "Shadow", "Glow", "Pulse", "MinSize", "Insignia", "Flash", "Portrait", "Avatar" }
+local SKIP_NAME = { "Icn", "Icon", "Shadow", "Glow", "Pulse", "MinSize", "Insignia", "Flash", "Portrait", "Avatar", "Thumbnail", "Preview" }
 -- outlines around components: light ones become a muted outline color; never a "background"
 local OUTLINE = { "Stroke", "Outline" }
 -- thin decorative layers (swoops, line reveals, dials, barcodes): untouched and never a background for text
