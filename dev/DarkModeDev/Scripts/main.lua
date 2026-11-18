@@ -9,17 +9,17 @@ LoopInGameThreadWithDelay(500, function()
         if s ~= src then
             src = s
             local chunk, err = load(s, "live.lua")
-            if not chunk then print("[DarkMode] compile error: " .. tostring(err) .. "\n"); mod = nil
+            if not chunk then print("[DarkModeDev] compile error: " .. tostring(err) .. "\n"); mod = nil
             else
                 local ok, m = pcall(chunk)
-                if ok then mod = m; ctx.reloaded = true; print("[DarkMode] reloaded\n")
-                else print("[DarkMode] load error: " .. tostring(m) .. "\n"); mod = nil end
+                if ok then mod = m; ctx.reloaded = true; print("[DarkModeDev] reloaded\n")
+                else print("[DarkModeDev] load error: " .. tostring(m) .. "\n"); mod = nil end
             end
         end
     end
     if mod and mod.tick then
         local ok, err = pcall(mod.tick, ctx)
-        if not ok and err ~= ctx.lastErr then ctx.lastErr = err; print("[DarkMode] tick error: " .. tostring(err) .. "\n") end
+        if not ok and err ~= ctx.lastErr then ctx.lastErr = err; print("[DarkModeDev] tick error: " .. tostring(err) .. "\n") end
     end
 end)
-print("[DarkMode] dev loader started\n")
+print("[DarkModeDev] dev loader started\n")

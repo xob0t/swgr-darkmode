@@ -1,248 +1,244 @@
--- Deterministic test: every step sets ABSOLUTE values for every knob (re-applied each tick),
--- so nothing can compound between steps or reloads. Originals are captured once per game session.
+-- UI dark-mode rule engine (hot-reloaded by DarkModeDev).
+--
+-- Systemic, not per-menu:
+--  * "paper" panels = Image/Border brushes that are plain panel shapes (procedural squircle/pill/backing
+--    materials or solid boxes) with a light, unsaturated tint  -> tinted dark
+--  * dark text whose effective background is a darkened panel or the (now dark) backdrop -> light
+--  * CommonUI text style classes with dark text colors -> patched once on their CDO
+-- Artwork (textures, portrait materials) and colored panels are left alone.
 local M = {}
-local TICKS_PER_STEP = 10   -- 5 s per step
+
+local CFG = {
+    panel = { R = 0.034, G = 0.037, B = 0.040 },      -- linear; replaces paper panels (alpha kept)
+    text = { R = 0.78, G = 0.73, B = 0.67 },          -- the game's own cream text color
+    dark_luma = 0.12,                                 -- text/panels darker than this are "dark"
+    paper_luma = 0.30,                                -- panels lighter than this and unsaturated are "paper"
+    paper_sat = 0.15,
+    walk_every = 6,                                   -- ticks (0.5 s each) between full re-walks
+    debug_file = "C:/Users/admin/src/swgr-darkmode/dev/out/decisions.txt",
+}
+-- panel shapes (material or texture resource names)
+local PANEL_MATERIAL = { "Squircle", "Pill", "Backing", "Backer", "Panel", "Banner", "Rounded", "Box", "TileFill", "Section", "Card", "Plate", "_Fill" }
+-- screen-level decoration: never counts as "art" behind text; darkened if light
+local BACKDROP_RES = { "Vignette", "Gradient", "Background", "Blur", "Fade" }
+local BACKDROP_NAME = { "Vignette", "Background", "Gradient", "Blur" }
+local SKIP_NAME = { "Icn", "Icon", "Shadow", "Glow", "Pulse", "Stroke", "MinSize", "Insignia", "Flash", "Portrait", "Avatar" }
+local SKIP_ROOT = { "Hud", "HUD", "MPC_Manager" }
 
 local function ok(f, ...) local s, r = pcall(f, ...); if s then return r end end
 local function valid(o) return o ~= nil and ok(function() return o:IsValid() end) end
-local function full(o) return ok(function() return o:GetFullName() end) or "?" end
 local function short(o) return ok(function() return o:GetFName():ToString() end) or "?" end
-local function live(list)
-    local r = {}
-    for _, o in ipairs(list or {}) do
-        if valid(o) and not full(o):find("Default__", 1, true) then r[#r + 1] = o end
+local function full(o) return ok(function() return o:GetFullName() end) or "?" end
+local function classname(o) return ok(function() return o:GetClass():GetFName():ToString() end) or "?" end
+local function isa(o, c) return ok(function() return o:IsA(c) end) end
+local function log(s) print("[DarkModeDev] " .. s .. "\n") end
+local function luma(c) return 0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B end
+local function sat(c) return math.max(c.R, c.G, c.B) - math.min(c.R, c.G, c.B) end
+local function any(s, list) for _, p in ipairs(list) do if s:find(p, 1, true) then return true end end end
+local function fmt(c) return c and string.format("(%.2f %.2f %.2f %.2f)", c.R, c.G, c.B, c.A or 1) or "nil" end
+local function near(a, b) return math.abs(a - b) < 0.004 end
+-- text/tint colors that read badly on a dark background: very dark, or unsaturated mid-gray
+local function too_dark(c) local l = luma(c); return l < CFG.dark_luma or (l < 0.30 and sat(c) < 0.10) end
+
+-- Classify a brush * widget color:
+--   "paper"    light unsaturated panel shape            -> darkened, counts as dark backing
+--   "backdrop" screen-level decoration (vignette, bg)   -> darkened if light, text on it is lightened
+--   "dark"     already dark backing
+--   "art"      artwork / colored panel                  -> untouched, text on it untouched
+--   nil        draws nothing visible
+local function classify(brush, color, wname, opacity)
+    if any(wname, SKIP_NAME) then return nil end
+    local tint = ok(function() return brush.TintColor.SpecifiedColor end)
+    local drawAs = ok(function() return brush.DrawAs end)
+    if drawAs == 0 or not tint or not color then return nil end
+    local c = { R = tint.R * color.R, G = tint.G * color.G, B = tint.B * color.B, A = tint.A * color.A * (opacity or 1) }
+    if c.A < 0.35 then return nil end
+    local res = ok(function() return brush.ResourceObject end)
+    local resname = valid(res) and short(res) or ""
+    local l = luma(c)
+    if any(resname, BACKDROP_RES) or any(wname, BACKDROP_NAME) then
+        return "backdrop", c, resname, l > CFG.paper_luma and sat(c) < CFG.paper_sat
     end
-    return r
+    local panel = resname == "" or any(resname, PANEL_MATERIAL)
+    if l < CFG.dark_luma then return "dark", c, resname end
+    if panel and l > CFG.paper_luma and sat(c) < CFG.paper_sat then return "paper", c, resname, true end
+    return "art", c, resname
 end
-local function log(s) print("[DarkMode] " .. s .. "\n") end
-local function near(a, b) return a and b and math.abs(a - b) < 1e-3 end
 
--- Originals survive hot reloads (stored in a global), so they are captured from the untouched scene once.
-DARKMODE_ORIG = DARKMODE_ORIG or {}
-local O = DARKMODE_ORIG
+local WHITE = { R = 1, G = 1, B = 1, A = 1 }
+local function mul(a, b) return { R = a.R * b.R, G = a.G * b.G, B = a.B * b.B, A = (a.A or 1) * (b.A or 1) } end
+local function on_dark(bg) return bg == nil or bg == "paper" or bg == "dark" end
 
-local K   -- knobs: discovered objects
-local function discover()
-    K = { lights = {}, mids = {}, fogplanes = live(FindAllOf("BP_FogPlane_VFX_C")) }
-    for _, kind in ipairs({ "DirectionalLightComponent", "SkyLightComponent", "SpotLightComponent", "PointLightComponent", "RectLightComponent" }) do
-        for _, l in ipairs(live(FindAllOf(kind))) do
-            local key = full(l)
-            if O[key] == nil then O[key] = l.Intensity end
-            K.lights[#K.lights + 1] = { obj = l, orig = O[key] }
+-- bg   = what is drawn behind this subtree (nil = backdrop, which is dark after the scene/vignette fixes)
+-- tint = inherited color multiplier (Border.ContentColorAndOpacity, UserWidget.ColorAndOpacity)
+local function collect(w, bg, out, depth, path, tint)
+    if not valid(w) or depth > 45 then return end
+    local vis = ok(function() return w.Visibility end)
+    if vis == 1 or vis == 2 then return end
+    tint = tint or WHITE
+    local n = short(w)
+    path = path .. "/" .. n
+    local ind = string.rep(" ", depth)
+    if isa(w, "/Script/UMG.TextBlock") then
+        local c = ok(function() return w.ColorAndOpacity.SpecifiedColor end)
+        local eff = c and mul(c, tint)
+        local txt = ok(function() return w:GetText():ToString() end) or ""
+        out.tree[#out.tree + 1] = ind .. "T " .. n .. " " .. fmt(c) .. " eff=" .. fmt(eff) .. " bg=" .. tostring(bg or "backdrop") .. ' "' .. txt:sub(1, 40):gsub("%c", " ") .. '"'
+        -- only fix the text itself when its own color is the dark part (dark tints are fixed at the tint)
+        if c and too_dark(c) and on_dark(bg) then
+            out.text[#out.text + 1] = w
+            out.log[#out.log + 1] = "TEXT   " .. path .. " " .. fmt(c) .. " on " .. tostring(bg or "backdrop")
         end
+        return
     end
-    local TINTABLE = { SM_LiminalSphereBackground = true, Plane = true, SM_FrontEndStudio_01 = true }
-    for _, a in ipairs(live(FindAllOf("StaticMeshActor"))) do
-        local comp = ok(function() return a.StaticMeshComponent end)
-        local mesh = valid(comp) and ok(function() return comp.StaticMesh end)
-        local meshname = valid(mesh) and short(mesh) or ""
-        if TINTABLE[meshname] then
-            local n = ok(function() return comp:GetNumMaterials() end) or 1
-            for slot = 0, n - 1 do
-                local m = ok(function() return comp:GetMaterial(slot) end)
-                if valid(m) and full(m):find("FrontendFloor", 1, true) then
-                    local mid = m
-                    if not full(m):find("MaterialInstanceDynamic", 1, true) then
-                        mid = comp:CreateDynamicMaterialInstance(slot, m, FName("None"))
-                    end
-                    local key = "param:" .. full(a) .. ":" .. slot
-                    if O[key] == nil then
-                        local c = mid:K2_GetVectorParameterValue(FName("Param"))
-                        O[key] = { R = c.R, G = c.G, B = c.B, A = c.A }
-                    end
-                    K.mids[#K.mids + 1] = { obj = mid, orig = O[key], name = short(a), mesh = meshname, slot = slot }
+    if isa(w, "/Script/UMG.RichTextBlock") then
+        -- default (untagged) style comes from the style table; it's resolved into DefaultTextStyle
+        local c = ok(function() return w.DefaultTextStyle.ColorAndOpacity.SpecifiedColor end)
+        local set = ok(function() return short(w.TextStyleSet) end) or "?"
+        out.tree[#out.tree + 1] = ind .. "R " .. n .. " " .. fmt(c) .. " set=" .. set .. " bg=" .. tostring(bg or "backdrop")
+        if c and too_dark(c) and on_dark(bg) then
+            out.rich[#out.rich + 1] = w
+            out.log[#out.log + 1] = "RICH   " .. path .. " " .. fmt(c) .. " " .. set
+        end
+        return
+    end
+    if isa(w, "/Script/UMG.UserWidget") then
+        local uc = ok(function() local v = w.ColorAndOpacity; return { R = v.R, G = v.G, B = v.B, A = v.A } end) or WHITE
+        out.tree[#out.tree + 1] = ind .. "U " .. classname(w) .. " " .. n .. (luma(uc) < 0.99 and (" uw=" .. fmt(uc)) or "")
+        if too_dark(uc) and on_dark(bg) then
+            out.uwtints[#out.uwtints + 1] = w
+            uc = { R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = uc.A }
+        end
+        collect(ok(function() return w.WidgetTree.RootWidget end), bg, out, depth + 1, path, mul(tint, uc))
+        return
+    end
+    local childBg, childTint = bg, tint
+    local myop = ok(function() return w.RenderOpacity end) or 1
+    if isa(w, "/Script/UMG.Border") then
+        local kind, c, res, darken = classify(ok(function() return w.Background end), ok(function() return w.BrushColor end), n, myop)
+        if darken then
+            out.borders[#out.borders + 1] = w
+            out.log[#out.log + 1] = "BORDER " .. path .. " " .. fmt(c) .. " " .. res
+        end
+        if kind == "backdrop" then childBg = nil elseif kind then childBg = kind end
+        local cc = ok(function() local v = w.ContentColorAndOpacity; return { R = v.R, G = v.G, B = v.B, A = v.A } end) or WHITE
+        if too_dark(cc) and on_dark(childBg) then
+            out.contents[#out.contents + 1] = w
+            out.log[#out.log + 1] = "CONTENT " .. path .. " " .. fmt(cc)
+            cc = { R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = cc.A }
+        end
+        childTint = mul(tint, cc)
+        out.tree[#out.tree + 1] = ind .. "B " .. n .. " " .. tostring(kind) .. (darken and "*" or "") .. " " .. fmt(c) .. " " .. tostring(res) .. " content=" .. fmt(cc)
+    else
+        out.tree[#out.tree + 1] = ind .. classname(w):gsub("^Fuse", "") .. " " .. n
+    end
+    local count = ok(function() return w:GetChildrenCount() end) or 0
+    local overlay = isa(w, "/Script/UMG.Overlay") or isa(w, "/Script/UMG.CanvasPanel")
+    local siblingBg = childBg
+    for i = 0, count - 1 do
+        local child = ok(function() return w:GetChildAt(i) end)
+        if valid(child) and isa(child, "/Script/UMG.Image") then
+            local cvis = ok(function() return child.Visibility end)
+            if cvis ~= 1 and cvis ~= 2 then
+                local cname = short(child)
+                local cop = ok(function() return child.RenderOpacity end) or 1
+                local kind, c, res, darken = classify(ok(function() return child.Brush end), ok(function() return child.ColorAndOpacity end), cname, cop)
+                local sz = ok(function() local d = child:GetDesiredSize(); return string.format("%.0fx%.0f", d.X, d.Y) end) or "?"
+                out.tree[#out.tree + 1] = ind .. " I " .. cname .. " " .. tostring(kind) .. (darken and "*" or "") .. " " .. fmt(c) .. " " .. tostring(res) .. " " .. sz
+                if darken then
+                    out.images[#out.images + 1] = child
+                    out.log[#out.log + 1] = "IMAGE  " .. path .. "/" .. cname .. " " .. fmt(c) .. " " .. res
+                end
+                if kind and overlay then
+                    if kind == "backdrop" then siblingBg = childBg else siblingBg = kind end
                 end
             end
+        else
+            collect(child, overlay and siblingBg or childBg, out, depth + 1, path, childTint)
         end
     end
-    local f = io.open("C:/Users/admin/src/swgr-re/darkmode/originals.txt", "w")
-    for _, l in ipairs(K.lights) do f:write(full(l.obj):match("[^%.]+$"), " ", tostring(l.orig), "\n") end
-    for _, m in ipairs(K.mids) do f:write(m.mesh, " slot ", m.slot, " ", m.name, string.format(" Param %.3f %.3f %.3f\n", m.orig.R, m.orig.G, m.orig.B)) end
-    f:close()
 end
 
-local DARK = { R = 0.02, G = 0.019, B = 0.018, A = 1 }
--- Each step lists only what differs from the untouched scene. Fields:
---   dir / sky / other = light scale for directional / sky / all other lights
---   bg = backdrop color, nofogplanes, noatm, nofog, ui
--- The height fog is OFF in the untouched scene, so every step keeps nofog = true.
--- Redo of rounds 2 (cumulative) and 3 (combinations), each at 100% and 20% light.
-local function L20(t) t.sky = 0.2; t.dir = 0.2; t.other = 0.2; return t end
-local function S(t) t.nofog = true; t.nosph = true; t.nofogplanes = true; t.noflr = true; t.nostu = true; t.ui = true; return t end
-local TEAL = { R = 0.020, G = 0.034, B = 0.036, A = 1 }
-local BROWN = { R = 0.030, G = 0.019, B = 0.011, A = 1 }
-local function T(t) t.nofog = true; t.nosph = true; t.nofogplanes = true; t.dir = 0.2; t.ui = true; return t end
-local STEPS = {
-    { "sun20: studio slot1 teal, floor brown", T({ stu1 = TEAL, floortint = BROWN }) },
-    { "sun20: studio slot0+1 teal, floor brown", T({ stu0 = TEAL, stu1 = TEAL, floortint = BROWN }) },
-    { "sun20: studio slot0 brown, slot1 teal, floor brown", T({ stu0 = BROWN, stu1 = TEAL, floortint = BROWN }) },
-    { "sun20: studio slot1 teal, floor brown, atmosphere hidden", T({ stu1 = TEAL, floortint = BROWN, noatm = true }) },
-    { "sun100: studio slot1 teal, floor brown", T({ stu1 = TEAL, floortint = BROWN, dir = 1.0 }) },
-    { "sun20: studio hidden, floor brown", T({ nostu = true, floortint = BROWN }) },
-    { "done (all restored)", { nofog = true, ui = true } },
-}
-local STUDIO_STEPS = {
-    { "studio set hidden, lights 100%", S({}) },
-    { "studio set hidden, sun 20%", S({ dir = 0.2 }) },
-    { "studio set hidden, sun 5%", S({ dir = 0.05 }) },
-    { "studio set hidden, atmosphere hidden", S({ noatm = true }) },
-    { "studio set hidden, atmosphere hidden, skylight 60%", S({ noatm = true, sky = 0.6 }) },
-    { "studio set hidden, sun 5%, skylight 60%", S({ dir = 0.05, sky = 0.6 }) },
-    { "studio set hidden, all lights 20% (redo of step 16)", S({ dir = 0.2, sky = 0.2, other = 0.2 }) },
-    { "done (all restored)", { nofog = true, ui = true } },
-}
-local OLD_STEPS = {
-    { "R2 baseline", { nofog = true } },
-    { "R2 spheres", { nofog = true, nosph = true } },
-    { "R2 spheres+fogplanes", { nofog = true, nosph = true, nofogplanes = true } },
-    { "R2 spheres+fogplanes+floor", { nofog = true, nosph = true, nofogplanes = true, noflr = true } },
-    { "R2 spheres+fogplanes+floor+studio", { nofog = true, nosph = true, nofogplanes = true, noflr = true, nostu = true } },
-    { "R2 same, UI shown", { nofog = true, nosph = true, nofogplanes = true, noflr = true, nostu = true, ui = true } },
-    { "R3 fogplanes", { nofog = true, nofogplanes = true } },
-    { "R3 floor", { nofog = true, noflr = true } },
-    { "R3 spheres+floor", { nofog = true, nosph = true, noflr = true } },
-    { "L20 baseline", L20({ nofog = true }) },
-    { "L20 spheres", L20({ nofog = true, nosph = true }) },
-    { "L20 floor", L20({ nofog = true, noflr = true }) },
-    { "L20 spheres+floor", L20({ nofog = true, nosph = true, noflr = true }) },
-    { "L20 spheres+fogplanes+floor", L20({ nofog = true, nosph = true, nofogplanes = true, noflr = true }) },
-    { "L20 spheres+fogplanes+floor+studio", L20({ nofog = true, nosph = true, nofogplanes = true, noflr = true, nostu = true }) },
-    { "L20 same, UI shown", L20({ nofog = true, nosph = true, nofogplanes = true, noflr = true, nostu = true, ui = true }) },
-    { "done (all restored)", { nofog = true, ui = true } },
-}
-
-local function lightclass(l)
-    local c = full(l):match("^(%S+)")
-    if c == "DirectionalLightComponent" then return "dir" elseif c == "SkyLightComponent" then return "sky" end
-    return "other"
+local function roots()
+    local list, key = {}, {}
+    for _, w in ipairs(FindAllOf("UserWidget") or {}) do
+        if valid(w) and ok(function() return w:IsInViewport() end) then
+            local cn = classname(w)
+            if cn:find("^WBP_") and not any(cn, SKIP_ROOT) then list[#list + 1] = w; key[#key + 1] = cn end
+        end
+    end
+    table.sort(key)
+    return list, table.concat(key, ",")
 end
 
-local function apply(step)
-    local s = step[2]
-    for _, l in ipairs(K.lights) do
-        l.class = l.class or lightclass(l.obj)
-        local want = l.orig * (s[l.class] or 1.0)
-        if valid(l.obj) and not near(l.obj.Intensity, want) then l.obj:SetIntensity(want) end
-    end
-    for _, m in ipairs(K.mids) do
-        local c
-        if m.mesh == "SM_LiminalSphereBackground" then c = s.bg
-        elseif m.mesh == "Plane" then c = s.floortint
-        elseif m.mesh == "SM_FrontEndStudio_01" then c = s["stu" .. m.slot] end
-        if valid(m.obj) then m.obj:SetVectorParameterValue(FName("Param"), c or m.orig) end
-    end
-    if not K.spheres then
-        K.spheres = {}
-        for _, a in ipairs(live(FindAllOf("StaticMeshActor"))) do
-            local comp = ok(function() return a.StaticMeshComponent end)
-            local mesh = valid(comp) and ok(function() return comp.StaticMesh end)
-            if valid(mesh) and short(mesh) == "SM_LiminalSphereBackground" then K.spheres[#K.spheres + 1] = a end
-        end
-    end
-    for _, a in ipairs(K.spheres) do
-        local h = s.nosph == true
-        if valid(a) and ok(function() return a.bHidden end) ~= h then a:SetActorHiddenInGame(h) end
-    end
-    if not K.floor then
-        K.floor = {}
-        for _, a in ipairs(live(FindAllOf("StaticMeshActor"))) do
-            local comp = ok(function() return a.StaticMeshComponent end)
-            local mesh = valid(comp) and ok(function() return comp.StaticMesh end)
-            if valid(mesh) and short(mesh) == "Plane" then K.floor[#K.floor + 1] = a end
-        end
-    end
-    for _, a in ipairs(K.floor) do
-        local h = s.noflr == true
-        if valid(a) and ok(function() return a.bHidden end) ~= h then a:SetActorHiddenInGame(h) end
-    end
-    if not K.studio then
-        K.studio = {}
-        for _, a in ipairs(live(FindAllOf("StaticMeshActor"))) do
-            local comp = ok(function() return a.StaticMeshComponent end)
-            local mesh = valid(comp) and ok(function() return comp.StaticMesh end)
-            if valid(mesh) and short(mesh) == "SM_FrontEndStudio_01" then K.studio[#K.studio + 1] = a end
-        end
-    end
-    if not K.studioDumped then
-        K.studioDumped = true
-        local f = io.open("C:/Users/admin/src/swgr-re/darkmode/studio_material.txt", "w")
-        for _, a in ipairs(K.studio) do
-            local comp = ok(function() return a.StaticMeshComponent end)
-            local n = ok(function() return comp:GetNumMaterials() end) or 1
-            for i = 0, n - 1 do
-                local m = ok(function() return comp:GetMaterial(i) end)
-                f:write(short(a), " slot ", i, ": ", full(m), "\n")
-                local p = m
-                for _ = 1, 4 do
-                    ok(function() p.VectorParameterValues:ForEach(function(_, it)
-                        local e = it:get(); local c = e.ParameterValue
-                        f:write(string.format("   vec %s = %.3f %.3f %.3f %.3f\n", e.ParameterInfo.Name:ToString(), c.R, c.G, c.B, c.A)) end) end)
-                    ok(function() p.ScalarParameterValues:ForEach(function(_, it)
-                        local e = it:get(); f:write(string.format("   scalar %s = %.3f\n", e.ParameterInfo.Name:ToString(), e.ParameterValue)) end) end)
-                    ok(function() p.TextureParameterValues:ForEach(function(_, it)
-                        local e = it:get(); f:write("   tex ", e.ParameterInfo.Name:ToString(), " = ", full(e.ParameterValue), "\n") end) end)
-                    p = ok(function() return p.Parent end)
-                    if not valid(p) then break end
-                    f:write("   parent ", full(p), "\n")
-                end
-            end
-        end
-        f:close()
-    end
-    for _, a in ipairs(K.studio) do
-        local h = s.nostu == true
-        if valid(a) and ok(function() return a.bHidden end) ~= h then a:SetActorHiddenInGame(h) end
-    end
-    for _, a in ipairs(K.fogplanes) do
-        local h = s.nofogplanes == true
-        if valid(a) and ok(function() return a.bHidden end) ~= h then a:SetActorHiddenInGame(h) end
-    end
-    K.atm = K.atm or live(FindAllOf("SkyAtmosphereComponent"))
-    K.fog = K.fog or live(FindAllOf("ExponentialHeightFogComponent"))
-    for _, c in ipairs(K.atm) do if ok(function() return c:IsVisible() end) ~= not s.noatm then c:SetVisibility(not s.noatm, false) end end
-    for _, c in ipairs(K.fog) do
-        if ok(function() return c:IsVisible() end) ~= not s.nofog then c:SetVisibility(not s.nofog, false) end
-        local key = "fogstart:" .. full(c)
-        if O[key] == nil then O[key] = c.StartDistance end
-        local want = s.fogstart or O[key]
-        if not near(c.StartDistance, want) then c:SetStartDistance(want) end
-    end
-    local o = s.ui and 1.0 or 0.0
-    for _, w in ipairs(live(FindAllOf("UserWidget"))) do
-        if ok(function() return w:IsInViewport() end) and ok(function() return w.RenderOpacity end) ~= o then w:SetRenderOpacity(o) end
+local function darken_image(img)
+    local c = ok(function() return img.ColorAndOpacity end)
+    if c and not near(c.R, CFG.panel.R) then img:SetColorAndOpacity({ R = CFG.panel.R, G = CFG.panel.G, B = CFG.panel.B, A = c.A }) end
+end
+local function darken_border(b)
+    local c = ok(function() return b.BrushColor end)
+    if c and not near(c.R, CFG.panel.R) then b:SetBrushColor({ R = CFG.panel.R, G = CFG.panel.G, B = CFG.panel.B, A = c.A }) end
+end
+local function lighten_text(t)
+    local c = ok(function() return t.ColorAndOpacity.SpecifiedColor end)
+    if c and too_dark(c) then
+        t:SetColorAndOpacity({ SpecifiedColor = { R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = c.A }, ColorUseRule = 0 })
     end
 end
+
+local function lighten_content(b)
+    local c = ok(function() return b.ContentColorAndOpacity end)
+    if c and too_dark(c) then
+        b:SetContentColorAndOpacity({ R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = c.A })
+    end
+end
+local function lighten_uw(w)
+    local c = ok(function() return w.ColorAndOpacity end)
+    if c and too_dark(c) then
+        w:SetColorAndOpacity({ R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = c.A })
+    end
+end
+local function lighten_rich(w)
+    local c = ok(function() return w.DefaultTextStyle.ColorAndOpacity.SpecifiedColor end)
+    if c and too_dark(c) then
+        w:SetDefaultColorAndOpacity({ SpecifiedColor = { R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = c.A }, ColorUseRule = 0 })
+    end
+end
+local KINDS = { "images", "borders", "text", "contents", "uwtints", "rich" }
+local APPLY = { images = darken_image, borders = darken_border, text = lighten_text, contents = lighten_content, uwtints = lighten_uw, rich = lighten_rich }
 
 function M.tick(ctx)
-    if ctx.reloaded then ctx.reloaded = false; ctx.state = { wait = 0, t = 0, i = 0 }; K = nil end
+    if ctx.reloaded then ctx.reloaded = false; ctx.state = { n = 0 } end
     local st = ctx.state
-    if st.finished then return end
-    if st.i == 0 then
-        local mm = FindFirstOf("WBP_FE_MainMenu_C")
-        if not valid(mm) or not ok(function() return mm:IsInViewport() end) then return end
-        st.wait = st.wait + 1
-        if st.wait < 10 then return end   -- let the menu settle 5 s
-        discover()
-        log(string.format("discovered %d lights, %d backdrop materials, %d fog planes", #K.lights, #K.mids, #K.fogplanes))
-        st.i, st.t = 1, 0
-        log("step 1: " .. STEPS[1][1])
+    st.n = st.n + 1
+    if not st.targets or st.n % CFG.walk_every == 0 then
+        local list, key = roots()
+        local out = { images = {}, borders = {}, text = {}, contents = {}, uwtints = {}, rich = {}, log = {}, tree = {} }
+        for _, r in ipairs(list) do collect(r, nil, out, 0, classname(r)) end
+        if key ~= st.key then
+            log(string.format("%d roots: %d panels + %d borders, %d texts, %d rich, %d content tints, %d widget tints",
+                #list, #out.images, #out.borders, #out.text, #out.rich, #out.contents, #out.uwtints))
+            local f = io.open(CFG.debug_file, "a")
+            if f then f:write("== ", key, "\n", table.concat(out.log, "\n"), "\n"); f:close() end
+            DARKMODE_SCREEN_N = (DARKMODE_SCREEN_N or 0) + 1
+            local g = io.open(string.format("C:/Users/admin/src/swgr-darkmode/dev/out/screens/%03d.txt", DARKMODE_SCREEN_N), "w")
+            if g then g:write("screens: ", key, "\n", table.concat(out.tree, "\n"), "\n"); g:close() end
+            log("screen dump " .. DARKMODE_SCREEN_N)
+        end
+        -- keep earlier targets (once darkened they classify as "dark" and drop out of the walk)
+        if st.targets and key == st.key then
+            for _, k in ipairs(KINDS) do
+                local seen = {}
+                for _, o in ipairs(out[k]) do seen[o] = true end
+                for _, o in ipairs(st.targets[k]) do if not seen[o] and valid(o) then out[k][#out[k] + 1] = o end end
+            end
+        end
+        st.key, st.targets = key, out
     end
-    local s, e = pcall(apply, STEPS[st.i])
-    if not s and not st.err then st.err = true; log("apply error: " .. tostring(e)) end
-    st.t = st.t + 1
-    if st.t < TICKS_PER_STEP then return end
-    st.t = 0
-    st.i = st.i + 1
-    if not STEPS[st.i] then st.finished = true; return end
-    log("step " .. st.i .. ": " .. STEPS[st.i][1])
+    for _, k in ipairs(KINDS) do
+        local f = APPLY[k]
+        for _, o in ipairs(st.targets[k]) do if valid(o) then pcall(f, o) end end
+    end
 end
 
 return M
--- run 1794963226
--- run 1794963343
--- run 1794963445
--- run 1794963622
--- run 1794963727
--- run 1794963841
--- run 1794964003
--- run 1794964651
