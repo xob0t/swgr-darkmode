@@ -14,6 +14,8 @@
 --
 -- UI widgets are handled by ui.lua (rule engine over reusable components; see that file).
 
+local VERSION = "dev"      -- set from the git tag by the release workflow
+
 local CONFIG = {
     wall = { R = 0.020, G = 0.034, B = 0.036, A = 1.0 },   -- linear color
     floor = { R = 0.030, G = 0.019, B = 0.011, A = 1.0 },
@@ -133,4 +135,4 @@ if CONFIG.ui then
     end
 end
 
-log("loaded")
+log("loaded " .. VERSION)

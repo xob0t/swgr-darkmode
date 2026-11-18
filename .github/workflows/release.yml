@@ -1,0 +1,48 @@
+name: Release
+
+# Push a tag like v1.0.0 to build the mod zip and publish a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Lua syntax
+        run: |
+          sudo apt-get install -y -qq lua5.4 >/dev/null
+          for f in mod/DarkMode/Scripts/*.lua; do luac5.4 -p "$f"; done
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE=build/ue4ss/Mods/DarkMode
+          mkdir -p "$STAGE"
+          cp -r mod/DarkMode/Scripts "$STAGE/"
+          touch "$STAGE/enabled.txt"
+          sed -i "s/^local VERSION = \"dev\"/local VERSION = \"$VERSION\"/" "$STAGE/Scripts/main.lua"
+          grep -q "^local VERSION = \"$VERSION\"" "$STAGE/Scripts/main.lua"
+          (cd build && zip -qr "../DarkMode-$GITHUB_REF_NAME.zip" ue4ss)
+          unzip -l "DarkMode-$GITHUB_REF_NAME.zip"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          ## Install
+
+          1. Install UE4SS with the Galactic Racer signatures (see the README).
+          2. Extract the zip into `STAR WARS Galactic Racer\Griffin\Binaries\Win64`.
+             It creates `ue4ss\Mods\DarkMode`.
+
+          To update, extract over the old version.
+          EOF
+          gh release create "$GITHUB_REF_NAME" "DarkMode-$GITHUB_REF_NAME.zip" \
+            --title "DarkMode $GITHUB_REF_NAME" --notes-file notes.md --generate-notes --verify-tag

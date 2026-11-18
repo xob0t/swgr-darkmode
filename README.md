@@ -1,7 +1,6 @@
 # DarkMode for STAR WARS Galactic Racer
 
-A UE4SS Lua mod that makes the game's very bright, white front end dark: the 3D backdrop behind the
-menus and the UI itself (panels, cards, dialogs, text).
+The game's menus are bright white. This mod makes them dark.
 
 | Before | After |
 |---|---|
@@ -11,43 +10,55 @@ menus and the UI itself (panels, cards, dialogs, text).
 |---|---|
 | ![settings](docs/img/ui_settings.jpg) | ![scenarios](docs/img/ui_scenarios.jpg) |
 
+## What it changes
+
+- **Main menu backdrop:** the white photo studio behind the menus becomes a dark teal wall with a dark
+  brown floor.
+- **Menus and dialogs:** white panels, cards and backgrounds become dark grey, and dark text on them
+  becomes the game's own cream text color.
+- **Left alone:** artwork, character portraits, icons, colored highlights and the in-race HUD.
+
+It recolors the shared building blocks (panels, cards, text) rather than individual screens, so menus
+that weren't tested should be covered too.
+
 ## Requirements
 
-- STAR WARS Galactic Racer (Steam build 26133805, UE 5.7.4)
-- Official [RE-UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) v4.0.0 plus the Galactic Racer custom config
-  ([UE4SS PR #1502](https://github.com/UE4SS-RE/RE-UE4SS/pull/1502)): copy the five
-  `UE4SS_Signatures/*.lua` files next to `UE4SS.dll`.
-- [UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2), a UE4SS fork on
-  Nexus Mods, might also work, but it hasn't been tested with this mod.
+- STAR WARS Galactic Racer on Steam
+- [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS/releases) v4.0.0 with the Galactic Racer signatures. The
+  game isn't supported by stock UE4SS yet, so copy the
+  [`UE4SS_Signatures` folder](https://github.com/xob0t/RE-UE4SS/tree/add-star-wars-galactic-racer-config/assets/CustomGameConfigs/Star%20Wars%20Galactic%20Racer)
+  next to `UE4SS.dll` ([UE4SS PR #1502](https://github.com/UE4SS-RE/RE-UE4SS/pull/1502)).
+
+[UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2), a UE4SS fork on
+Nexus Mods, might also work, but it hasn't been tested with this mod.
 
 ## Install
 
-Copy `mod/DarkMode` into `Griffin/Binaries/Win64/ue4ss/Mods/` and create an empty `enabled.txt` in it
-(or add `DarkMode : 1` to `mods.txt`).
+1. Download `DarkMode-vX.Y.Z.zip` from [Releases](../../releases).
+2. Extract it into `STAR WARS Galactic Racer\Griffin\Binaries\Win64`. This creates
+   `ue4ss\Mods\DarkMode`.
+3. Start the game.
 
-## What it does
+To update, extract the new version over the old one. To uninstall, delete `ue4ss\Mods\DarkMode`.
 
-**3D backdrop** (`main.lua`): the menus are drawn over a white "photo studio" set in the `L_FrontEnd`
-level. The mod tints that set instead of removing it (removing it leaves black holes in the floor):
+## Changing the colors
 
-- `SM_FrontEndStudio_01` slot 1 (unlit cyclorama wall) → dark teal
-- `SM_FrontEndStudio_01` slot 0 (lit floor) → dark brown
-- `SM_LiminalSphereBackground` (unlit cream spheres) and `BP_FogPlane_VFX_C` (white haze cards) → hidden
-- the lighting rig's directional light → 20%
+Open the files in `ue4ss\Mods\DarkMode\Scripts` in a text editor. Colors are linear RGB values from 0 to 1.
 
-**UI** (`ui.lua`): the game has no theme or palette, so the mod recolors by component type rather than
-per menu. Light "paper" panels, tile and card bases, scrims and vignettes become dark. Light outlines
-become muted. Dark text, dark tint wrappers and dark rich text on those surfaces become the game's own
-cream text color. Artwork, thumbnails, icons, decoration and colored panels are left alone. The work is
-time-sliced over frames (about 0.1 ms per frame on average), so it doesn't cause hitches.
+- `main.lua`, `CONFIG`: the backdrop (`wall`, `floor`) and how much the light is dimmed
+  (`sun_scale`). Set `ui = false` to darken only the backdrop and leave the menus as they are.
+- `ui.lua`, `CFG`: the menus (`panel`, `outline`, `text`).
 
-To avoid a white flash when a screen opens, every decision is also applied to the widget class's
-template (recorded in `Scripts/learned.txt`, which ships with ~160 entries and grows as you play), and
-the game's runtime color changes (hover, focus, reactivated screens) are caught by hooks on the UMG
-color setters. See [docs/FINDINGS.md](docs/FINDINGS.md) for the rules and the screens that were checked.
+## Good to know
 
-No Blueprint hooks are used, so it isn't affected by
-[UE4SS #1503](https://github.com/UE4SS-RE/RE-UE4SS/issues/1503). The in-race HUD is not touched.
+- The first time you open a screen the mod hasn't seen before, it may show white for a moment. The mod
+  remembers it (in `Scripts\learned.txt`) and the screen opens dark from then on.
+- It costs about 0.1 ms per frame.
+- Not tested yet: race loading screens, the pause menu during a race, race results and online lobbies.
 
-Colors are in `CONFIG` at the top of `main.lua` (scene) and `CFG` at the top of `ui.lua` (UI), in
-linear RGB. Set `ui = false` in `main.lua` to only darken the backdrop.
+## How it works
+
+The game has no dark theme or color palette to switch, so the mod classifies widgets by type (panel,
+outline, text, artwork) and recolors them. To avoid white flashes it also patches the templates new
+screens are built from, and hooks the game's color setters to catch hover and focus changes. Details,
+findings and UE4SS notes are in [docs/FINDINGS.md](docs/FINDINGS.md).
