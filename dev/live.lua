@@ -28,6 +28,8 @@ local BACKDROP_NAME = { "Vignette", "Background", "Gradient", "Blur", "ColorFill
 local SKIP_NAME = { "Icn", "Icon", "Shadow", "Glow", "Pulse", "MinSize", "Insignia", "Flash", "Portrait", "Avatar" }
 -- outlines around components: light ones become a muted outline color; never a "background"
 local OUTLINE = { "Stroke", "Outline" }
+-- thin decorative layers (swoops, line reveals, dials, barcodes): untouched and never a background for text
+local DECOR = { "Deco", "Swoop", "Line", "Dial", "Barcode", "Title_Graphics", "ScreenTitles", "Divide" }
 local SKIP_ROOT = { "Hud", "HUD", "MPC_Manager" }
 
 local function ok(f, ...) local s, r = pcall(f, ...); if s then return r end end
@@ -66,6 +68,7 @@ local function classify(brush, color, wname, opacity)
         return "backdrop", c, resname, l > CFG.paper_luma and sat(c) < CFG.paper_sat
     end
     if c.A < 0.35 then return nil end
+    if any(wname, DECOR) or any(resname, DECOR) then return "decor", c, resname end
     if any(wname, OUTLINE) or any(resname, OUTLINE) then
         return "outline", c, resname, l > CFG.paper_luma and sat(c) < CFG.paper_sat
     end
@@ -177,7 +180,7 @@ local function collect(w, bg, out, depth, path, tint)
                     add(out, kind == "outline" and "outlines" or "images", child)
                     out.log[#out.log + 1] = "IMAGE  " .. path .. "/" .. cname .. " " .. fmt(c) .. " " .. res
                 end
-                if kind and overlay and kind ~= "outline" then
+                if kind and overlay and kind ~= "outline" and kind ~= "decor" then
                     if kind == "backdrop" then siblingBg = childBg else siblingBg = kind end
                 end
             end
