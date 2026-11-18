@@ -44,7 +44,9 @@ Vehicle select in the hubs uses a copy of the front-end set, built from `BP_GfnS
 - These are in the always-loaded persistent level, so one `FindAllOf` per level load (~15 ms) finds them.
 - `SM_LiminalSpaceInfinityWall` (`M_CustomisationRewardFloor`) is in a streamed cell and wasn't visible at
   vehicle select; not handled yet.
-- The hub is playable, so its sun and fog cards are left alone (front end only).
+- The hub is playable, so its sun is left alone, and only the haze cards (`BP_FogPlane_VFX_C`) within
+  200 m of a backdrop sphere are hidden. One sits right in front of the Loadout camera and turned the
+  backdrop grey; the other 16 are ~80 km away in the playable area.
 
 ## UI (UMG)
 
@@ -75,16 +77,25 @@ root (`WBP_*` in the viewport) is walked, and what's behind each widget is track
 
 | Component | Detected by | Becomes |
 |---|---|---|
-| paper panel | Image/Border, light + unsaturated, resource or widget name looks like a panel (`Squircle`, `Pill`, `Backing`, `TileButton`, `_Fill`, `Grunge`, `Img_Tile_Base`, `Img_Backer`, ...) | dark panel |
+| paper panel | Image/Border, light + unsaturated, resource or widget name looks like a panel (`Squircle`, `Pill`, `Backing`, `TileButton`, `_Fill`, `Grunge`, `Img_Tile_Base`, `Img_Backer`, ...) | dark panel; nested panels alternate with a raised shade |
 | screen layer | widget name `Background`/`Vignette`/`ColorFill`/..., resource `Vignette`/`Gradient`/`Blur`; counts even at low alpha (scrims) | dark if light |
 | outline | `Stroke`/`Outline`, light + unsaturated | muted outline |
 | decor | `Deco`, `Swoop`, `Line`, `Dial`, `Barcode`, title graphics | untouched; never a background |
 | artwork | thumbnails, portraits, icons, textures, colored panels | untouched; text on it untouched |
 | text | `TextBlock` color too dark on a dark/darkened background | cream |
-| tint wrapper | `Border.ContentColorAndOpacity` / `UserWidget.ColorAndOpacity` too dark | cream |
+| tint wrapper | `Border.ContentColorAndOpacity` / `UserWidget.ColorAndOpacity` near-black (text colors) | cream; grey dimming tints and `*Image*` wrappers untouched |
 | rich text | `RichTextBlock.DefaultTextStyle` too dark | `SetDefaultColorAndOpacity(cream)` |
 
 Details that mattered:
+
+- **Nested panels alternate shades.** Darkening every light panel to one color made panels inside
+  panels disappear (empty Logbook slots on their section). A panel whose parent background is a panel
+  gets the raised shade, one inside a raised panel gets the panel color again. Only the parent's
+  background counts, not earlier layers of the same component (a card's fill on its own base).
+  Panels darkened earlier (or via a patched template) are recognized by color and re-shaded, and the
+  learned entry is updated (later lines in `learned.txt` win).
+- **Tint wrappers dim artwork too.** Locked cards set `B_ImageTint`'s content tint to grey (0.30) to dim
+  their art; lifting it to cream washed them out. Only near-black tints (text) are lightened.
 
 - List and tile views (`ListViewBase`) generate their entries: walk `GetDisplayedEntryWidgets()`.
 - The button-hint bar (`WBP_ActionBar` → `FuseBoundActionBar`, a `DynamicEntryBoxBase`) also pools its
@@ -173,5 +184,5 @@ Exit to Main Menu dialog, Hibi's Shop (garage) and its upgrade picker, vehicle s
 Continue Campaign / Exit to Main Menu round trips (4x) without crashes. Logbook/Settings → Pause and
 gameplay → Pause recorded at 30 fps with no light frames.
 
-Not checked: race loading screens, the in-race HUD/pause and post-race results (starting a race would
-change campaign or arcade stats), online multiplayer lobbies.
+Also confirmed by playing: race loading screens, the in-race pause menu, race results and online lobbies.
+The in-race HUD is intentionally not touched.

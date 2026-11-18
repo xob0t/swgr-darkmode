@@ -17,6 +17,7 @@ local M = {}
 local CFG = {
     panel = { R = 0.034, G = 0.037, B = 0.040 },      -- linear; replaces paper panels (alpha kept)
     outline = { R = 0.090, G = 0.095, B = 0.100 },    -- replaces light outlines/strokes
+    raised = { R = 0.062, G = 0.066, B = 0.071 },     -- panels on top of another panel (empty slots, inner cards)
     text = { R = 0.78, G = 0.73, B = 0.67 },          -- the game's own cream text color
     -- letters on light keyboard key caps. The textured input icons have cut-out glyphs that show the
     -- darkened hint bar through them (about sRGB 60), so the letters use that, not black.
@@ -63,7 +64,24 @@ local function color4(v) return { R = v.R, G = v.G, B = v.B, A = v.A } end
 local function cream(a) return { R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = a } end
 -- text/tint colors that read badly on a dark background: very dark, or unsaturated mid-gray
 local function too_dark(c) local l = luma(c); return l < CFG.dark_luma or (l < 0.30 and sat(c) < 0.10) end
+-- tint wrappers (Border content color, UserWidget color) multiply everything inside them. Near-black
+-- ones are text colors meant for light panels; mid-grey ones dim artwork (locked cards), so leave those.
+local function dark_tint(c) return luma(c) < CFG.dark_luma end
 local WHITE = { R = 1, G = 1, B = 1, A = 1 }
+-- already our panel color (from an earlier pass or a patched template)
+local function is_panel(c) return c ~= nil and near(c.R, CFG.panel.R) and near(c.G, CFG.panel.G) and near(c.B, CFG.panel.B) end
+local function is_raised(c) return c ~= nil and near(c.R, CFG.raised.R) and near(c.G, CFG.raised.G) and near(c.B, CFG.raised.B) end
+-- Nested panels alternate shades so every level stands out from its parent: a panel on the backdrop
+-- gets the panel color, a panel on a panel gets the raised shade, a panel on a raised panel gets the
+-- panel color again (empty slots then read as darker holes in a lighter section).
+-- Returns the target ("panel"/"raised"), or nil when the widget isn't one of these panels.
+local function panel_target(kind, c, parentBg)
+    local ours = kind == "dark" and (is_panel(c) or is_raised(c))
+    if kind ~= "paper" and not ours then return nil end
+    if parentBg == "raised" then return "panel" end
+    if parentBg == "paper" or parentBg == "dark" then return "raised" end
+    return "panel"
+end
 local function mul(a, b) return { R = a.R * b.R, G = a.G * b.G, B = a.B * b.B, A = (a.A or 1) * (b.A or 1) } end
 local function on_dark(bg) return bg == nil or bg == "paper" or bg == "dark" end
 
@@ -235,7 +253,8 @@ local function learned()
             local k, cp, name = line:match("^(%w+)\t(%S+):WidgetTree%.(%S+)$")
             if k then
                 local e = LL.by[cp] or {}; LL.by[cp] = e
-                if not e[name] then e[name] = k; LL.n[cp] = (LL.n[cp] or 0) + 1 end
+                if not e[name] then LL.n[cp] = (LL.n[cp] or 0) + 1 end
+                e[name] = k   -- later lines override (images -> raised upgrades)
             end
         end
         f:close()
@@ -348,8 +367,12 @@ local function add(out, kind, w, addr, rb)
     if cls then
         local LL = learned()
         local e = LL.by[cp] or {}; LL.by[cp] = e
-        if not e[F.name] then
-            e[F.name] = kind; LL.n[cp] = (LL.n[cp] or 0) + 1
+        local prev = e[F.name]
+        local swap = { images = "raised", raised = "images", borders = "raisedborders", raisedborders = "borders" }
+        local upgrade = prev ~= nil and swap[prev] == kind
+        if not prev or upgrade then
+            if not prev then LL.n[cp] = (LL.n[cp] or 0) + 1 end
+            e[F.name] = kind
             LL.fresh[#LL.fresh + 1] = kind .. "\t" .. cp .. ":WidgetTree." .. F.name
             LL.dirty[cp] = cls
         end
@@ -404,7 +427,7 @@ local function process(t, out, push)
     if cf.kind == "uw" then
         local uc = ok(function() return color4(w.ColorAndOpacity) end) or WHITE
         if DEV then out.tree[#out.tree + 1] = ind .. "U " .. cf.name .. " " .. n .. (luma(uc) < 0.99 and (" uw=" .. fmt(uc)) or "") end
-        if too_dark(uc) and on_dark(bg) then
+        if dark_tint(uc) and on_dark(bg) then
             add(out, "uwtints", w, F.addr, rb)
             uc = cream(uc.A)
         end
@@ -418,13 +441,17 @@ local function process(t, out, push)
     if cf.border then
         local myop = ok(function() return w.RenderOpacity end) or 1
         local kind, c, res, darken = classify(ok(function() return w.Background end), ok(function() return w.BrushColor end), n, myop)
-        if darken then
-            add(out, "borders", w, F.addr, rb)
+        -- nested panels alternate shades (see panel_target); also re-shades panels darkened before
+        local target = panel_target(kind, c, bg)
+        local want = target == "raised" and is_raised(c) or target == "panel" and is_panel(c)
+        if (darken or target) and not (target and want) then
+            add(out, target == "raised" and "raisedborders" or "borders", w, F.addr, rb)
             if DEV then out.log[#out.log + 1] = "BORDER  " .. path .. " " .. fmt(c) .. " " .. res end
         end
-        if kind == "backdrop" then childBg = nil elseif kind and kind ~= "decor" and kind ~= "outline" then childBg = kind end
+        if kind == "backdrop" then childBg = nil elseif target == "raised" then childBg = "raised"
+        elseif kind and kind ~= "decor" and kind ~= "outline" then childBg = kind end
         local cc = ok(function() return color4(w.ContentColorAndOpacity) end) or WHITE
-        if too_dark(cc) and on_dark(childBg) then
+        if dark_tint(cc) and on_dark(childBg) and not n:find("Image", 1, true) then
             add(out, "contents", w, F.addr, rb)
             if DEV then out.log[#out.log + 1] = "CONTENT " .. path .. " " .. fmt(cc) end
             cc = cream(cc.A)
@@ -470,12 +497,17 @@ local function process(t, out, push)
                         local sz = ok(function() local d = child:GetDesiredSize(); return string.format("%.0fx%.0f", d.X, d.Y) end) or "?"
                         out.tree[#out.tree + 1] = ind .. " I " .. cname .. " " .. tostring(kind) .. (darken and "*" or "") .. " " .. fmt(c) .. " " .. tostring(res) .. " " .. sz
                     end
-                    if darken then
-                        add(out, kind == "outline" and "outlines" or kind == "keycap" and "keycaps" or "images", child, CF.addr, childRb)
+                    -- nesting uses the parent's background, not earlier layers of the same component
+                    -- (a card's fill on its own base is not a nested panel)
+                    local target = kind ~= "backdrop" and panel_target(kind, c, childBg) or nil
+                    local want = target == "raised" and is_raised(c) or target == "panel" and is_panel(c)
+                    if (darken or target) and not (target and want) then
+                        local raised = target == "raised"
+                        add(out, kind == "outline" and "outlines" or kind == "keycap" and "keycaps" or raised and "raised" or "images", child, CF.addr, childRb)
                         if DEV then out.log[#out.log + 1] = "IMAGE   " .. path .. "/" .. cname .. " " .. fmt(c) .. " " .. res end
                     end
                     if kind and cf.overlay and kind ~= "outline" and kind ~= "decor" then
-                        if kind == "backdrop" then siblingBg = childBg else siblingBg = kind end
+                        if kind == "backdrop" then siblingBg = childBg elseif target == "raised" then siblingBg = "raised" else siblingBg = kind end
                     end
                 end
             else
@@ -486,7 +518,7 @@ local function process(t, out, push)
     for i = #later, 1, -1 do push(later[i]) end   -- reversed so the stack pops them in order
 end
 
-local KINDS = { "images", "outlines", "keycaps", "borders", "text", "keytext", "contents", "uwtints", "rich" }
+local KINDS = { "images", "raised", "outlines", "keycaps", "borders", "raisedborders", "text", "keytext", "contents", "uwtints", "rich" }
 local function new_out()
     local o = { retainers = {}, log = {}, tree = {} }
     for _, k in ipairs(KINDS) do o[k] = {} end
@@ -568,7 +600,8 @@ local function paint(img, col, cond)
     if c and not near(c.R, col.R) and cond(c) then img:SetColorAndOpacity({ R = col.R, G = col.G, B = col.B, A = c.A }); return true end
 end
 APPLY = {
-    images = function(w) return paint(w, CFG.panel, is_paper) end,
+    images = function(w) return paint(w, CFG.panel, function(c) return is_paper(c) or is_raised(c) end) end,
+    raised = function(w) return paint(w, CFG.raised, function(c) return is_paper(c) or is_panel(c) end) end,
     outlines = function(w) return paint(w, CFG.outline, is_paper) end,
     keycaps = function(w) return paint(w, CFG.text, function(c) return luma(c) < CFG.paper_luma end) end,
     keytext = function(t)
@@ -580,7 +613,11 @@ APPLY = {
     end,
     borders = function(b)
         local c = ok(function() return b.BrushColor end)
-        if c and not near(c.R, CFG.panel.R) and is_paper(c) then b:SetBrushColor({ R = CFG.panel.R, G = CFG.panel.G, B = CFG.panel.B, A = c.A }); return true end
+        if c and not near(c.R, CFG.panel.R) and (is_paper(c) or is_raised(c)) then b:SetBrushColor({ R = CFG.panel.R, G = CFG.panel.G, B = CFG.panel.B, A = c.A }); return true end
+    end,
+    raisedborders = function(b)
+        local c = ok(function() return b.BrushColor end)
+        if c and not near(c.R, CFG.raised.R) and (is_paper(c) or is_panel(c)) then b:SetBrushColor({ R = CFG.raised.R, G = CFG.raised.G, B = CFG.raised.B, A = c.A }); return true end
     end,
     text = function(t)
         local c = ok(function() return t.ColorAndOpacity.SpecifiedColor end)
@@ -588,11 +625,11 @@ APPLY = {
     end,
     contents = function(b)
         local c = ok(function() return b.ContentColorAndOpacity end)
-        if c and too_dark(c) then b:SetContentColorAndOpacity(cream(c.A)); return true end
+        if c and dark_tint(c) then b:SetContentColorAndOpacity(cream(c.A)); return true end
     end,
     uwtints = function(w)
         local c = ok(function() return w.ColorAndOpacity end)
-        if c and too_dark(c) then w:SetColorAndOpacity(cream(c.A)); return true end
+        if c and dark_tint(c) then w:SetColorAndOpacity(cream(c.A)); return true end
     end,
     rich = function(w)
         local c = ok(function() return w.DefaultTextStyle.ColorAndOpacity.SpecifiedColor end)
@@ -637,8 +674,8 @@ end
 local CUR_ST                -- the tick's state (targets)
 local SETTERS = {
     { "/Script/UMG.TextBlock:SetColorAndOpacity", { "text", "keytext" } },
-    { "/Script/UMG.Image:SetColorAndOpacity", { "images", "outlines", "keycaps" } },
-    { "/Script/UMG.Border:SetBrushColor", { "borders" } },
+    { "/Script/UMG.Image:SetColorAndOpacity", { "images", "raised", "outlines", "keycaps" } },
+    { "/Script/UMG.Border:SetBrushColor", { "borders", "raisedborders" } },
     { "/Script/UMG.Border:SetContentColorAndOpacity", { "contents" } },
     { "/Script/UMG.UserWidget:SetColorAndOpacity", { "uwtints" } },
     { "/Script/UMG.RichTextBlock:SetDefaultColorAndOpacity", { "rich" } },
@@ -806,7 +843,13 @@ local function tick_body(ctx)
     local LL = learned()
     if next(LL.dirty) then
         local d = LL.dirty; LL.dirty = {}
-        for _, cls in pairs(d) do if valid(cls) then pcall(patch_class, cls) end end
+        for _, cls in pairs(d) do
+            if valid(cls) then
+                local ci = class_info(cls)
+                if ci then ci.done = -1 end   -- new or upgraded entries: re-apply this class
+                pcall(patch_class, cls)
+            end
+        end
     end
 
     -- keep known targets recolored (the game resets colors on hover/state changes)

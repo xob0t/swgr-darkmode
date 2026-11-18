@@ -6,8 +6,9 @@
 --   SM_FrontEndStudio_01 slot 1 (unlit cyclorama wall)  -> dark teal
 --   SM_FrontEndStudio_01 slot 0 (lit floor)             -> dark brown
 --   SM_LiminalSphereBackground (unlit cream spheres)    -> dark teal (the backdrop in the hubs)
--- Front end only (the hubs are playable, so their lighting and fog stay as they are):
---   BP_FogPlane_VFX_C (white haze cards)                -> hidden
+--   BP_FogPlane_VFX_C (white haze cards)                -> hidden: all in the front end, only the ones
+--                                                         near the spheres in the hubs (Loadout backdrop)
+-- Front end only (the hubs are playable, so their lighting stays as it is):
 --   DirectionalLight in the lighting rig                -> 20% (only lights the floor/sand)
 -- All of these materials expose a single vector parameter named "Param" (base color).
 --
@@ -22,7 +23,8 @@ local CONFIG = {
     wall = { R = 0.020, G = 0.034, B = 0.036, A = 1.0 },   -- linear color
     floor = { R = 0.030, G = 0.019, B = 0.011, A = 1.0 },
     sun_scale = 0.2,        -- front end only
-    hide_fog_planes = true, -- front end only
+    hide_fog_planes = true, -- all in the front end, near the backdrop in the hubs
+    fog_radius = 20000,     -- hubs: hide haze cards within this distance (cm) of a backdrop sphere
     ui = true,              -- recolor UI widgets (ui.lua)
 }
 
@@ -69,6 +71,7 @@ local function discover(world, name)
         local m = mid_for(comp, slot)
         if valid(m) then scene.tints[#scene.tints + 1] = { mid = m, color = color } end
     end
+    local spheres = {}
     -- includes subclasses (the hubs use BP_GfnStaticMeshActor_C)
     for _, a in ipairs(live(FindAllOf("StaticMeshActor"))) do
         local comp = ok(function() return a.StaticMeshComponent end)
@@ -79,12 +82,24 @@ local function discover(world, name)
             tint(comp, 0, CONFIG.floor)
         elseif mname == "SM_LiminalSphereBackground" then
             tint(comp, 0, CONFIG.wall)
+            local l = ok(function() return a:K2_GetActorLocation() end)
+            if l then spheres[#spheres + 1] = { X = l.X, Y = l.Y, Z = l.Z } end
+        end
+    end
+    if CONFIG.hide_fog_planes and (fe or #spheres > 0) then
+        local r2 = CONFIG.fog_radius * CONFIG.fog_radius
+        for _, a in ipairs(live(FindAllOf("BP_FogPlane_VFX_C"))) do
+            local near = fe
+            if not near then
+                local l = ok(function() return a:K2_GetActorLocation() end)
+                for _, c in ipairs(spheres) do
+                    if l and (l.X - c.X) ^ 2 + (l.Y - c.Y) ^ 2 + (l.Z - c.Z) ^ 2 < r2 then near = true; break end
+                end
+            end
+            if near then scene.hide[#scene.hide + 1] = a end
         end
     end
     if fe then
-        if CONFIG.hide_fog_planes then
-            for _, a in ipairs(live(FindAllOf("BP_FogPlane_VFX_C"))) do scene.hide[#scene.hide + 1] = a end
-        end
         for _, l in ipairs(live(FindAllOf("DirectionalLightComponent"))) do
             local key = full(l)
             sun_orig[key] = sun_orig[key] or l.Intensity
