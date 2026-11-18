@@ -17,6 +17,8 @@ menus and the UI itself (panels, cards, dialogs, text).
 - Official [RE-UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) v4.0.0 plus the Galactic Racer custom config
   ([UE4SS PR #1502](https://github.com/UE4SS-RE/RE-UE4SS/pull/1502)): copy the five
   `UE4SS_Signatures/*.lua` files next to `UE4SS.dll`.
+- [UE4SS Galactic Racer Edition](https://www.nexusmods.com/starwarsgalacticracer/mods/2), a UE4SS fork on
+  Nexus Mods, might also work, but it hasn't been tested with this mod.
 
 ## Install
 
