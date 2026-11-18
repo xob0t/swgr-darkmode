@@ -10,6 +10,7 @@ local M = {}
 
 local CFG = {
     panel = { R = 0.034, G = 0.037, B = 0.040 },      -- linear; replaces paper panels (alpha kept)
+    outline = { R = 0.090, G = 0.095, B = 0.100 },    -- replaces light outlines/strokes
     text = { R = 0.78, G = 0.73, B = 0.67 },          -- the game's own cream text color
     dark_luma = 0.12,                                 -- text/panels darker than this are "dark"
     paper_luma = 0.30,                                -- panels lighter than this and unsaturated are "paper"
@@ -18,11 +19,15 @@ local CFG = {
     debug_file = "C:/Users/admin/src/swgr-darkmode/dev/out/decisions.txt",
 }
 -- panel shapes (material or texture resource names)
-local PANEL_MATERIAL = { "Squircle", "Pill", "Backing", "Backer", "Panel", "Banner", "Rounded", "Box", "TileFill", "Section", "Card", "Plate", "_Fill" }
+local PANEL_MATERIAL = { "Squircle", "Pill", "Backing", "Backer", "Panel", "Banner", "Rounded", "Box", "TileFill", "Section", "Card", "Plate", "_Fill", "TileButton", "Grunge" }
+-- widget names that mean "this image is the base/backing of a component"
+local PANEL_WIDGET = { "Img_Tile_Base", "Img_Tile_Fill", "Img_Backer", "Img_Backing", "Img_Base", "Img_Fill", "Img_Panel" }
 -- screen-level decoration: never counts as "art" behind text; darkened if light
 local BACKDROP_RES = { "Vignette", "Gradient", "Background", "Blur", "Fade" }
 local BACKDROP_NAME = { "Vignette", "Background", "Gradient", "Blur" }
-local SKIP_NAME = { "Icn", "Icon", "Shadow", "Glow", "Pulse", "Stroke", "MinSize", "Insignia", "Flash", "Portrait", "Avatar" }
+local SKIP_NAME = { "Icn", "Icon", "Shadow", "Glow", "Pulse", "MinSize", "Insignia", "Flash", "Portrait", "Avatar" }
+-- outlines around components: light ones become a muted outline color; never a "background"
+local OUTLINE = { "Stroke", "Outline" }
 local SKIP_ROOT = { "Hud", "HUD", "MPC_Manager" }
 
 local function ok(f, ...) local s, r = pcall(f, ...); if s then return r end end
@@ -56,15 +61,21 @@ local function classify(brush, color, wname, opacity)
     local res = ok(function() return brush.ResourceObject end)
     local resname = valid(res) and short(res) or ""
     local l = luma(c)
+    if any(wname, OUTLINE) or any(resname, OUTLINE) then
+        return "outline", c, resname, l > CFG.paper_luma and sat(c) < CFG.paper_sat
+    end
     if any(resname, BACKDROP_RES) or any(wname, BACKDROP_NAME) then
         return "backdrop", c, resname, l > CFG.paper_luma and sat(c) < CFG.paper_sat
     end
-    local panel = resname == "" or any(resname, PANEL_MATERIAL)
+    local panel = resname == "" or any(resname, PANEL_MATERIAL) or any(wname, PANEL_WIDGET)
     if l < CFG.dark_luma then return "dark", c, resname end
     if panel and l > CFG.paper_luma and sat(c) < CFG.paper_sat then return "paper", c, resname, true end
     return "art", c, resname
 end
 
+local CUR_RB = nil   -- nearest RetainerBox ancestor during the walk (they cache their content)
+local RB_OF = setmetatable({}, { __mode = "k" })   -- target widget -> RetainerBox
+local function add(out, kind, w) out[kind][#out[kind] + 1] = w; if CUR_RB then RB_OF[w] = CUR_RB end end
 local WHITE = { R = 1, G = 1, B = 1, A = 1 }
 local function mul(a, b) return { R = a.R * b.R, G = a.G * b.G, B = a.B * b.B, A = (a.A or 1) * (b.A or 1) } end
 local function on_dark(bg) return bg == nil or bg == "paper" or bg == "dark" end
@@ -86,7 +97,7 @@ local function collect(w, bg, out, depth, path, tint)
         out.tree[#out.tree + 1] = ind .. "T " .. n .. " " .. fmt(c) .. " eff=" .. fmt(eff) .. " bg=" .. tostring(bg or "backdrop") .. ' "' .. txt:sub(1, 40):gsub("%c", " ") .. '"'
         -- only fix the text itself when its own color is the dark part (dark tints are fixed at the tint)
         if c and too_dark(c) and on_dark(bg) then
-            out.text[#out.text + 1] = w
+            add(out, "text", w)
             out.log[#out.log + 1] = "TEXT   " .. path .. " " .. fmt(c) .. " on " .. tostring(bg or "backdrop")
         end
         return
@@ -97,7 +108,7 @@ local function collect(w, bg, out, depth, path, tint)
         local set = ok(function() return short(w.TextStyleSet) end) or "?"
         out.tree[#out.tree + 1] = ind .. "R " .. n .. " " .. fmt(c) .. " set=" .. set .. " bg=" .. tostring(bg or "backdrop")
         if c and too_dark(c) and on_dark(bg) then
-            out.rich[#out.rich + 1] = w
+            add(out, "rich", w)
             out.log[#out.log + 1] = "RICH   " .. path .. " " .. fmt(c) .. " " .. set
         end
         return
@@ -106,7 +117,7 @@ local function collect(w, bg, out, depth, path, tint)
         local uc = ok(function() local v = w.ColorAndOpacity; return { R = v.R, G = v.G, B = v.B, A = v.A } end) or WHITE
         out.tree[#out.tree + 1] = ind .. "U " .. classname(w) .. " " .. n .. (luma(uc) < 0.99 and (" uw=" .. fmt(uc)) or "")
         if too_dark(uc) and on_dark(bg) then
-            out.uwtints[#out.uwtints + 1] = w
+            add(out, "uwtints", w)
             uc = { R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = uc.A }
         end
         collect(ok(function() return w.WidgetTree.RootWidget end), bg, out, depth + 1, path, mul(tint, uc))
@@ -117,13 +128,13 @@ local function collect(w, bg, out, depth, path, tint)
     if isa(w, "/Script/UMG.Border") then
         local kind, c, res, darken = classify(ok(function() return w.Background end), ok(function() return w.BrushColor end), n, myop)
         if darken then
-            out.borders[#out.borders + 1] = w
+            add(out, "borders", w)
             out.log[#out.log + 1] = "BORDER " .. path .. " " .. fmt(c) .. " " .. res
         end
         if kind == "backdrop" then childBg = nil elseif kind then childBg = kind end
         local cc = ok(function() local v = w.ContentColorAndOpacity; return { R = v.R, G = v.G, B = v.B, A = v.A } end) or WHITE
         if too_dark(cc) and on_dark(childBg) then
-            out.contents[#out.contents + 1] = w
+            add(out, "contents", w)
             out.log[#out.log + 1] = "CONTENT " .. path .. " " .. fmt(cc)
             cc = { R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = cc.A }
         end
@@ -132,9 +143,24 @@ local function collect(w, bg, out, depth, path, tint)
     else
         out.tree[#out.tree + 1] = ind .. classname(w):gsub("^Fuse", "") .. " " .. n
     end
+    if isa(w, "/Script/UMG.ListViewBase") then
+        -- list/tile views generate entry widgets; they are not panel children
+        local entries = {}
+        local r = ok(function() return w:GetDisplayedEntryWidgets() end)
+        if type(r) == "table" then
+            for _, e in ipairs(r) do entries[#entries + 1] = (type(e) == "userdata" and ok(function() return e:get() end)) or e end
+        elseif r ~= nil then
+            ok(function() r:ForEach(function(_, it) entries[#entries + 1] = it:get() end) end)
+        end
+        out.tree[#out.tree + 1] = ind .. " (" .. #entries .. " list entries, ret " .. type(r) .. ")"
+        for _, e in ipairs(entries) do collect(e, childBg, out, depth + 1, path, childTint) end
+        return
+    end
     local count = ok(function() return w:GetChildrenCount() end) or 0
     local overlay = isa(w, "/Script/UMG.Overlay") or isa(w, "/Script/UMG.CanvasPanel")
     local siblingBg = childBg
+    local prevRB = CUR_RB
+    if isa(w, "/Script/UMG.RetainerBox") then CUR_RB = w; out.retainers[#out.retainers + 1] = w end
     for i = 0, count - 1 do
         local child = ok(function() return w:GetChildAt(i) end)
         if valid(child) and isa(child, "/Script/UMG.Image") then
@@ -146,10 +172,10 @@ local function collect(w, bg, out, depth, path, tint)
                 local sz = ok(function() local d = child:GetDesiredSize(); return string.format("%.0fx%.0f", d.X, d.Y) end) or "?"
                 out.tree[#out.tree + 1] = ind .. " I " .. cname .. " " .. tostring(kind) .. (darken and "*" or "") .. " " .. fmt(c) .. " " .. tostring(res) .. " " .. sz
                 if darken then
-                    out.images[#out.images + 1] = child
+                    add(out, kind == "outline" and "outlines" or "images", child)
                     out.log[#out.log + 1] = "IMAGE  " .. path .. "/" .. cname .. " " .. fmt(c) .. " " .. res
                 end
-                if kind and overlay then
+                if kind and overlay and kind ~= "outline" then
                     if kind == "backdrop" then siblingBg = childBg else siblingBg = kind end
                 end
             end
@@ -157,6 +183,7 @@ local function collect(w, bg, out, depth, path, tint)
             collect(child, overlay and siblingBg or childBg, out, depth + 1, path, childTint)
         end
     end
+    CUR_RB = prevRB
 end
 
 local function roots()
@@ -171,51 +198,75 @@ local function roots()
     return list, table.concat(key, ",")
 end
 
+-- Each returns true when it actually changed something (so cached RetainerBoxes can be re-rendered).
 local function darken_image(img)
     local c = ok(function() return img.ColorAndOpacity end)
-    if c and not near(c.R, CFG.panel.R) then img:SetColorAndOpacity({ R = CFG.panel.R, G = CFG.panel.G, B = CFG.panel.B, A = c.A }) end
+    if c and not near(c.R, CFG.panel.R) then img:SetColorAndOpacity({ R = CFG.panel.R, G = CFG.panel.G, B = CFG.panel.B, A = c.A }); return true end
 end
 local function darken_border(b)
     local c = ok(function() return b.BrushColor end)
-    if c and not near(c.R, CFG.panel.R) then b:SetBrushColor({ R = CFG.panel.R, G = CFG.panel.G, B = CFG.panel.B, A = c.A }) end
+    if c and not near(c.R, CFG.panel.R) then b:SetBrushColor({ R = CFG.panel.R, G = CFG.panel.G, B = CFG.panel.B, A = c.A }); return true end
 end
 local function lighten_text(t)
     local c = ok(function() return t.ColorAndOpacity.SpecifiedColor end)
     if c and too_dark(c) then
         t:SetColorAndOpacity({ SpecifiedColor = { R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = c.A }, ColorUseRule = 0 })
+        return true
     end
 end
-
 local function lighten_content(b)
     local c = ok(function() return b.ContentColorAndOpacity end)
     if c and too_dark(c) then
         b:SetContentColorAndOpacity({ R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = c.A })
+        return true
     end
 end
 local function lighten_uw(w)
     local c = ok(function() return w.ColorAndOpacity end)
     if c and too_dark(c) then
         w:SetColorAndOpacity({ R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = c.A })
+        return true
     end
 end
 local function lighten_rich(w)
     local c = ok(function() return w.DefaultTextStyle.ColorAndOpacity.SpecifiedColor end)
     if c and too_dark(c) then
         w:SetDefaultColorAndOpacity({ SpecifiedColor = { R = CFG.text.R, G = CFG.text.G, B = CFG.text.B, A = c.A }, ColorUseRule = 0 })
+        return true
     end
 end
-local KINDS = { "images", "borders", "text", "contents", "uwtints", "rich" }
-local APPLY = { images = darken_image, borders = darken_border, text = lighten_text, contents = lighten_content, uwtints = lighten_uw, rich = lighten_rich }
+local function outline_image(img)
+    local c = ok(function() return img.ColorAndOpacity end)
+    if c and not near(c.R, CFG.outline.R) then img:SetColorAndOpacity({ R = CFG.outline.R, G = CFG.outline.G, B = CFG.outline.B, A = c.A }); return true end
+end
+local KINDS = { "images", "outlines", "borders", "text", "contents", "uwtints", "rich" }
+local APPLY = { images = darken_image, outlines = outline_image, borders = darken_border, text = lighten_text, contents = lighten_content, uwtints = lighten_uw, rich = lighten_rich }
 
 function M.tick(ctx)
     if ctx.reloaded then ctx.reloaded = false; ctx.state = { n = 0 } end
     local st = ctx.state
     st.n = st.n + 1
+    -- dev only: one-shot experiments (out/exp.lua is run once with helpers, then deleted)
+    local EXP = "C:/Users/admin/src/swgr-darkmode/dev/out/exp.lua"
+    local ef = (ctx.dev ~= false) and io.open(EXP, "r")
+    if ef then
+        local src = ef:read("*a"); ef:close(); os.remove(EXP)
+        local chunk, err = load(src, "exp.lua", "t", setmetatable({ ok = ok, valid = valid, short = short, full = full,
+            classname = classname, isa = isa, log = log, fmt = fmt, CFG = CFG }, { __index = _G }))
+        if chunk then
+            local s, e = pcall(chunk)
+            log("exp: " .. (s and ("ok " .. tostring(e)) or ("error " .. tostring(e))))
+        else log("exp compile error: " .. tostring(err)) end
+    end
     if not st.targets or st.n % CFG.walk_every == 0 then
         local list, key = roots()
-        local out = { images = {}, borders = {}, text = {}, contents = {}, uwtints = {}, rich = {}, log = {}, tree = {} }
+        local sink = setmetatable({}, { __newindex = function() end })   -- discards debug lines outside dev
+        local out = { images = {}, outlines = {}, borders = {}, text = {}, contents = {}, uwtints = {}, rich = {}, retainers = {},
+            log = (ctx.dev ~= false) and {} or sink, tree = (ctx.dev ~= false) and {} or sink }
         for _, r in ipairs(list) do collect(r, nil, out, 0, classname(r)) end
-        if key ~= st.key then
+        local req = (ctx.dev ~= false) and io.open("C:/Users/admin/src/swgr-darkmode/dev/out/dump.req", "r")
+        if req then req:close(); os.remove("C:/Users/admin/src/swgr-darkmode/dev/out/dump.req") end
+        if (ctx.dev ~= false) and (key ~= st.key or req) then
             log(string.format("%d roots: %d panels + %d borders, %d texts, %d rich, %d content tints, %d widget tints",
                 #list, #out.images, #out.borders, #out.text, #out.rich, #out.contents, #out.uwtints))
             local f = io.open(CFG.debug_file, "a")
@@ -234,10 +285,21 @@ function M.tick(ctx)
             end
         end
         st.key, st.targets = key, out
+        for _, rb in ipairs(out.retainers) do pcall(function() rb:RequestRender() end) end
+        if #out.retainers > 0 and not st.rbLogged then st.rbLogged = true; log("retainer boxes re-rendered: " .. #out.retainers) end
     end
+    local rerender = {}
     for _, k in ipairs(KINDS) do
         local f = APPLY[k]
-        for _, o in ipairs(st.targets[k]) do if valid(o) then pcall(f, o) end end
+        for _, o in ipairs(st.targets[k]) do
+            if valid(o) then
+                local s, changed = pcall(f, o)
+                if s and changed and RB_OF[o] then rerender[RB_OF[o]] = true end
+            end
+        end
+    end
+    for rb in pairs(rerender) do
+        if valid(rb) then pcall(function() rb:RequestRender() end) end
     end
 end
 

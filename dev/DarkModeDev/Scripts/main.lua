@@ -1,6 +1,6 @@
 -- Dev loader: re-reads live.lua whenever it changes and calls its tick() on the game thread.
 local LIVE = "C:/Users/admin/src/swgr-darkmode/dev/live.lua"  -- absolute path to the hot-reloaded logic file
-local ctx = { state = {} }
+local ctx = { state = {}, dev = true }
 local src, mod = nil, nil
 LoopInGameThreadWithDelay(500, function()
     local f = io.open(LIVE, "r")

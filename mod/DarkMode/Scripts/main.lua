@@ -11,6 +11,8 @@
 --
 -- Everything is idempotent and re-applied once per second while the front end is loaded,
 -- so level reloads and the game resetting things are handled without hooks.
+--
+-- UI widgets are handled by ui.lua (rule engine over reusable components; see that file).
 
 local CONFIG = {
     wall = { R = 0.020, G = 0.034, B = 0.036, A = 1.0 },   -- linear color
@@ -18,6 +20,7 @@ local CONFIG = {
     sun_scale = 0.2,
     hide_spheres = true,
     hide_fog_planes = true,
+    ui = true,              -- recolor UI widgets (ui.lua)
 }
 
 local function ok(f, ...) local s, r = pcall(f, ...); if s then return r end end
@@ -103,5 +106,19 @@ LoopInGameThreadWithDelay(1000, function()
         scene = nil
     end
 end)
+
+if CONFIG.ui then
+    local loaded, UI = pcall(require, "ui")
+    if loaded and type(UI) == "table" and UI.tick then
+        local uictx = { state = {}, reloaded = true, dev = false }
+        local lastErr
+        LoopInGameThreadWithDelay(500, function()
+            local s, e = pcall(UI.tick, uictx)
+            if not s and e ~= lastErr then lastErr = e; log("ui error: " .. tostring(e)) end
+        end)
+    else
+        log("ui.lua failed to load: " .. tostring(UI))
+    end
+end
 
 log("loaded")
