@@ -100,6 +100,8 @@ local function facts(w)
             cf.kind = "panel"
             cf.border = isA(w, U .. "Border")
             cf.list = isA(w, U .. "ListViewBase")
+            -- entry boxes (CommonBoundActionBar = the button-hint bar) own pooled entry widgets
+            cf.entrybox = isA(w, U .. "DynamicEntryBoxBase")
             cf.overlay = isA(w, U .. "Overlay") or isA(w, U .. "CanvasPanel")
             cf.retainer = isA(w, U .. "RetainerBox")
         end
@@ -108,8 +110,9 @@ local function facts(w)
     f = { addr = addr, cls = clsaddr, name = short(w), cf = cf }
     if cf.kind == "uw" then
         -- widgets created inside another widget live in its WidgetTree; only top-level ones can be screens
+        -- UE4SS wraps a null outer in a non-nil userdata; calling methods on it is an access violation
         local outer = ok(function() return w:GetOuter() end)
-        f.toplevel = not (outer and short(ok(function() return outer:GetClass() end)) == "WidgetTree")
+        f.toplevel = not (valid(outer) and classname(outer) == "WidgetTree")
     end
     if addr then
         if FACT_N > 80000 then FACTS, FACT_N = {}, 0 end
@@ -247,10 +250,10 @@ local function process(t, out, push)
         out.tree[#out.tree + 1] = ind .. cf.name:gsub("^Fuse", "") .. " " .. n
     end
 
-    if cf.list then
-        -- list/tile views generate entry widgets; they are not panel children
+    if cf.list or cf.entrybox then
+        -- list/tile views and entry boxes generate entry widgets; they are not panel children
         local entries = {}
-        local r = ok(function() return w:GetDisplayedEntryWidgets() end)
+        local r = ok(function() return cf.list and w:GetDisplayedEntryWidgets() or w:GetAllEntries() end)
         if type(r) == "table" then
             for _, e in ipairs(r) do entries[#entries + 1] = (type(e) == "userdata" and ok(function() return e:get() end)) or e end
         elseif r ~= nil then
@@ -312,16 +315,20 @@ end
 -- A cycle: phase "roots" scans all UserWidgets for on-screen roots, phase "walk" processes the stack.
 -- step() works until the deadline and returns the result table when the cycle is complete.
 DARKMODE_TOPS = DARKMODE_TOPS or {}   -- global: address -> top-level UserWidget
+DARKMODE_NEW = DARKMODE_NEW or {}     -- global: UserWidgets created since the last cycle (NotifyOnNewObject)
 local function new_cycle(full_scan)
     -- candidates for on-screen roots: top-level UserWidgets. Recorded as they are created (see the
     -- NotifyOnNewObject hook); a full FindAllOf reseed runs on the first cycle and every 30 cycles.
     local all = {}
+    local fresh = DARKMODE_NEW
+    DARKMODE_NEW = {}
     if full_scan then
         all = FindAllOf("UserWidget") or {}
     else
         for a, o in pairs(DARKMODE_TOPS) do
             if valid(o) then all[#all + 1] = o else DARKMODE_TOPS[a] = nil end
         end
+        for _, o in ipairs(fresh) do all[#all + 1] = o end
     end
     return { phase = "roots", all = all, full = full_scan, i = 0, list = {}, keyparts = {}, stack = {} }
 end
@@ -334,7 +341,7 @@ local function step_cycle(cy, deadline)
             local w = all[cy.i]
             if valid(w) then
                 local F = facts(w)
-                if cy.full and F.toplevel and F.addr then DARKMODE_TOPS[F.addr] = w end
+                if F.toplevel and F.addr then DARKMODE_TOPS[F.addr] = w end
                 local cn = F.cf.name
                 if F.toplevel and cn:sub(1, 4) == "WBP_" and not any(cn, SKIP_ROOT) and ok(function() return w:IsInViewport() end) then
                     cy.list[#cy.list + 1] = w; cy.keyparts[#cy.keyparts + 1] = cn
@@ -447,7 +454,10 @@ local function finish(ctx, st, res)
     st.key, st.targets = key, out
     apply(out)
     -- retainer boxes cache their content; refresh them once per cycle so earlier changes show
-    for _, rb in ipairs(out.retainers) do pcall(function() rb:RequestRender() end) end
+    -- (the cycle spanned several frames: anything collected may have been destroyed since)
+    for _, rb in ipairs(out.retainers) do
+        if valid(rb) then pcall(function() rb:RequestRender() end) end
+    end
 end
 
 function M.tick(ctx)
@@ -475,12 +485,11 @@ function M.tick(ctx)
     -- new widgets were created (a screen opened): start a cycle now instead of waiting
     if not DARKMODE_NOTIFY and type(NotifyOnNewObject) == "function" then
         DARKMODE_NOTIFY = true   -- global: registered once per Lua state, survives hot reloads
+        -- the callback runs inside object construction: only queue the object, inspect it later
         pcall(NotifyOnNewObject, "/Script/UMG.UserWidget", function(o)
             DARKMODE_DIRTY = true
-            pcall(function()
-                local outer = o:GetOuter()
-                if not (outer and outer:GetClass():GetFName():ToString() == "WidgetTree") then DARKMODE_TOPS[o:GetAddress()] = o end
-            end)
+            local q = DARKMODE_NEW
+            if #q < 20000 then q[#q + 1] = o end
         end)
     end
     if DARKMODE_DIRTY and not st.co then DARKMODE_DIRTY = false; st.next_scan = math.min(st.next_scan or 0, math.max(st.frame + 2, (st.last_end or 0) + 15)) end

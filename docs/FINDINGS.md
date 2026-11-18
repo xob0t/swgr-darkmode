@@ -74,6 +74,9 @@ root (`WBP_*` in the viewport) is walked, and what's behind each widget is track
 Details that mattered:
 
 - List and tile views (`ListViewBase`) generate their entries: walk `GetDisplayedEntryWidgets()`.
+- The button-hint bar (`WBP_ActionBar` → `FuseBoundActionBar`, a `DynamicEntryBoxBase`) also pools its
+  entries (`WBP_Input_Dark_Btn`): walk `GetAllEntries()`. They have no panel children, so without this the
+  hints stay dark grey on the darkened pill.
 - `RetainerBox` caches its content in a render target. Call `RequestRender()` after recoloring inside it.
 - The card frames on Logbook/Parts are the `Img_Tile_Stroke*` outline images, not the grunge fill.
 - "Background" in a *texture* name is not a backdrop: `T_UI_Insignia_Background_*` are player banners.
@@ -92,6 +95,14 @@ new widgets are created. Before these optimizations a single walk was about 190 
   so everything is polled from frame/timer loops and applied idempotently.
 - UE4SS can't call into the engine from Lua **coroutines** ("lua state has no instance"). Use explicit
   work stacks for time slicing.
+- **Call `IsValid()` before every call on an object, every time.** Lua `pcall` does not catch access
+  violations; they crash the game. Two cases bit us (both crashed on Continue Campaign):
+  - UE4SS wraps a null pointer in a non-nil userdata (e.g. `GetOuter()` of an object with no outer);
+    `if outer then outer:GetClass()` reads address 0x10.
+  - Anything kept from an earlier frame may have been destroyed (a time-sliced cycle spans ~15 frames,
+    and a level change can happen in between). `IsValid()` does track garbage collection correctly.
+- `NotifyOnNewObject` callbacks run inside object construction: only queue the object there and
+  inspect it later from the tick.
 - UE4SS returns a new Lua userdata per object access, so key tables by `obj:GetAddress()`, not by the
   userdata.
 - `IsA("/Script/...")` with a string path is slow; resolve the UClass once with `StaticFindObject`.
@@ -103,7 +114,9 @@ new widgets are created. Before these optimizations a single walk was about 190 
 
 Main menu (Campaign, Scenarios, Arcade, Multiplayer tabs), Settings (all six tabs), Logbook (Main,
 Parts, Abilities), Scenario details, Arcade event details, Customize, Customize Vehicle / Edit Vehicle,
-Customize Player Banner, Party panel, Quit and Exit dialogs, and in the campaign hub: Pause, Build, Map.
+Customize Player Banner, Party panel, Quit and Exit dialogs, and in the campaign hub: Pause, Build, Map,
+Exit to Main Menu dialog. Button-hint bars on all of these. Continue Campaign / Exit to Main Menu round
+trips (4x) without crashes.
 
 Not checked: race loading screens, the in-race HUD/pause and post-race results (starting a race would
 change campaign or arcade stats), online multiplayer lobbies.
