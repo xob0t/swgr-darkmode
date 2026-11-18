@@ -12,8 +12,8 @@ The game's menus are bright white. This mod makes them dark.
 
 ## What it changes
 
-- **Main menu backdrop:** the white photo studio behind the menus becomes a dark teal wall with a dark
-  brown floor.
+- **3D backdrops:** the white photo studio behind the main menu becomes a dark teal wall with a dark
+  brown floor, and the white backdrop behind vehicle select in the planet hubs becomes dark teal.
 - **Menus and dialogs:** white panels, cards and backgrounds become dark grey, and dark text on them
   becomes the game's own cream text color.
 - **Left alone:** artwork, character portraits, icons, colored highlights and the in-race HUD.

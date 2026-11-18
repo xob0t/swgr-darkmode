@@ -1,16 +1,18 @@
 -- DarkMode for STAR WARS Galactic Racer (UE4SS Lua mod)
 --
--- Front-end scene: the menus sit in front of a white "photo studio" set in L_FrontEnd.
--- Instead of hiding it (which leaves holes), we tint its materials dark:
+-- Backdrops: menus with a 3D scene sit in front of a white "photo studio" set. It exists in the
+-- front end (L_FrontEnd) and, as a copy, in the planet hubs (L_<Planet>_PADDOCK) behind vehicle select.
+-- Instead of hiding it (which leaves holes or shows the level behind it), we tint its materials dark:
 --   SM_FrontEndStudio_01 slot 1 (unlit cyclorama wall)  -> dark teal
 --   SM_FrontEndStudio_01 slot 0 (lit floor)             -> dark brown
---   SM_LiminalSphereBackground (unlit cream spheres)    -> hidden
+--   SM_LiminalSphereBackground (unlit cream spheres)    -> dark teal (the backdrop in the hubs)
+-- Front end only (the hubs are playable, so their lighting and fog stay as they are):
 --   BP_FogPlane_VFX_C (white haze cards)                -> hidden
 --   DirectionalLight in the lighting rig                -> 20% (only lights the floor/sand)
 -- All of these materials expose a single vector parameter named "Param" (base color).
 --
--- Everything is idempotent and re-applied once per second while the front end is loaded,
--- so level reloads and the game resetting things are handled without hooks.
+-- The set is found once per level (FindAllOf, ~15 ms) and re-tinted once per second, so the game
+-- resetting things is handled without hooks.
 --
 -- UI widgets are handled by ui.lua (rule engine over reusable components; see that file).
 
@@ -19,9 +21,8 @@ local VERSION = "dev"      -- set from the git tag by the release workflow
 local CONFIG = {
     wall = { R = 0.020, G = 0.034, B = 0.036, A = 1.0 },   -- linear color
     floor = { R = 0.030, G = 0.019, B = 0.011, A = 1.0 },
-    sun_scale = 0.2,
-    hide_spheres = true,
-    hide_fog_planes = true,
+    sun_scale = 0.2,        -- front end only
+    hide_fog_planes = true, -- front end only
     ui = true,              -- recolor UI widgets (ui.lua)
 }
 
@@ -39,19 +40,19 @@ local function live(list)
 end
 
 local PARAM = nil              -- FName("Param"), created lazily on the game thread
-local scene = nil              -- cached objects for the currently loaded front-end world
+local scene = nil              -- cached objects for the current world
 local sun_orig = {}            -- original sun intensity per component full name
 
 -- FindFirstOf scans every object (~10 ms here), so keep the controller and world and only look
 -- them up again once they are gone (level change)
-local pc_cached, world_cached, world_is_fe = nil, nil, false
-local function in_front_end()
+local pc_cached, world_cached, world_name = nil, nil, ""
+local function current_world()
     if not valid(pc_cached) then pc_cached = FindFirstOf("PlayerController"); world_cached = nil end
     if not valid(world_cached) then
         world_cached = valid(pc_cached) and ok(function() return pc_cached:GetWorld() end) or nil
-        world_is_fe = valid(world_cached) and full(world_cached):find("/L_FrontEnd.", 1, true) ~= nil
+        world_name = valid(world_cached) and full(world_cached) or ""
     end
-    return world_is_fe
+    return world_cached, world_name
 end
 
 local function mid_for(comp, slot)
@@ -61,40 +62,52 @@ local function mid_for(comp, slot)
     return ok(function() return comp:CreateDynamicMaterialInstance(slot, m, FName("None")) end)
 end
 
-local function discover()
-    scene = { tints = {}, hide = {}, suns = {} }
+local function discover(world, name)
+    local fe = name:find("/L_FrontEnd.", 1, true) ~= nil
+    scene = { world = ok(function() return world:GetAddress() end), tints = {}, hide = {}, suns = {} }
+    local function tint(comp, slot, color)
+        local m = mid_for(comp, slot)
+        if valid(m) then scene.tints[#scene.tints + 1] = { mid = m, color = color } end
+    end
+    -- includes subclasses (the hubs use BP_GfnStaticMeshActor_C)
     for _, a in ipairs(live(FindAllOf("StaticMeshActor"))) do
         local comp = ok(function() return a.StaticMeshComponent end)
         local mesh = valid(comp) and ok(function() return comp.StaticMesh end)
-        local name = valid(mesh) and short(mesh) or ""
-        if name == "SM_FrontEndStudio_01" then
-            local wall, floor = mid_for(comp, 1), mid_for(comp, 0)
-            if valid(wall) then scene.tints[#scene.tints + 1] = { mid = wall, color = CONFIG.wall } end
-            if valid(floor) then scene.tints[#scene.tints + 1] = { mid = floor, color = CONFIG.floor } end
-        elseif name == "SM_LiminalSphereBackground" and CONFIG.hide_spheres then
-            scene.hide[#scene.hide + 1] = a
+        local mname = valid(mesh) and short(mesh) or ""
+        if mname == "SM_FrontEndStudio_01" then
+            tint(comp, 1, CONFIG.wall)
+            tint(comp, 0, CONFIG.floor)
+        elseif mname == "SM_LiminalSphereBackground" then
+            tint(comp, 0, CONFIG.wall)
         end
     end
-    if CONFIG.hide_fog_planes then
-        for _, a in ipairs(live(FindAllOf("BP_FogPlane_VFX_C"))) do scene.hide[#scene.hide + 1] = a end
+    if fe then
+        if CONFIG.hide_fog_planes then
+            for _, a in ipairs(live(FindAllOf("BP_FogPlane_VFX_C"))) do scene.hide[#scene.hide + 1] = a end
+        end
+        for _, l in ipairs(live(FindAllOf("DirectionalLightComponent"))) do
+            local key = full(l)
+            sun_orig[key] = sun_orig[key] or l.Intensity
+            scene.suns[#scene.suns + 1] = { obj = l, want = sun_orig[key] * CONFIG.sun_scale }
+        end
     end
-    for _, l in ipairs(live(FindAllOf("DirectionalLightComponent"))) do
-        local key = full(l)
-        sun_orig[key] = sun_orig[key] or l.Intensity
-        scene.suns[#scene.suns + 1] = { obj = l, want = sun_orig[key] * CONFIG.sun_scale }
-    end
-    log(string.format("front end: %d tints, %d hidden actors, %d suns", #scene.tints, #scene.hide, #scene.suns))
+    log(string.format("%s: %d tints, %d hidden actors, %d suns", name:match("([%w_]+)$") or "?",
+        #scene.tints, #scene.hide, #scene.suns))
 end
 
-local function stale()
-    if not scene then return true end
+-- rediscover on a level change, or when something we tinted is gone (never just because a level has
+-- no studio set: race levels would pay for a FindAllOf every second)
+local function stale(world)
+    if not scene or scene.world ~= ok(function() return world:GetAddress() end) then return true end
     for _, t in ipairs(scene.tints) do if not valid(t.mid) then return true end end
-    return #scene.tints == 0
+    return false
 end
 
 local function apply_scene()
     PARAM = PARAM or FName("Param")
-    if stale() then discover() end
+    local world, name = current_world()
+    if not valid(world) then scene = nil; return end
+    if stale(world) then discover(world, name) end
     for _, t in ipairs(scene.tints) do
         if valid(t.mid) then t.mid:SetVectorParameterValue(PARAM, t.color) end
     end
@@ -107,12 +120,8 @@ local function apply_scene()
 end
 
 LoopInGameThreadWithDelay(1000, function()
-    if in_front_end() then
-        local s, e = pcall(apply_scene)
-        if not s then log("scene error: " .. tostring(e)); scene = nil end
-    else
-        scene = nil
-    end
+    local s, e = pcall(apply_scene)
+    if not s then log("scene error: " .. tostring(e)); scene = nil end
 end)
 
 if CONFIG.ui then

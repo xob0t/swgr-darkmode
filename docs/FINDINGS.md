@@ -33,6 +33,19 @@ Variants tried (screenshots in `docs/img`):
 - `black_void.jpg`: studio set hidden plus atmosphere hidden: a black background with the vehicle fully
   lit, but the floor has black gaps between the sand pieces
 
+## Planet hubs (`L_<Planet>_PADDOCK`)
+
+Vehicle select in the hubs uses a copy of the front-end set, built from `BP_GfnStaticMeshActor_C`
+(a `StaticMeshActor` subclass; `FindAllOf("StaticMeshActor")` includes it):
+
+- 3 × `SM_LiminalSphereBackground` around the stage are the white backdrop here. Hiding them shows a
+  black void and the hub level behind, so they're tinted (`Param`) like the front-end wall.
+- `SM_FrontEndStudio_01` exists too (far from the stage); tinted the same way.
+- These are in the always-loaded persistent level, so one `FindAllOf` per level load (~15 ms) finds them.
+- `SM_LiminalSpaceInfinityWall` (`M_CustomisationRewardFloor`) is in a streamed cell and wasn't visible at
+  vehicle select; not handled yet.
+- The hub is playable, so its sun and fog cards are left alone (front end only).
+
 ## UI (UMG)
 
 - The game's widget framework is "Fuse": `FuseImage`, `FuseBorder`, `FuseTextBlock`, `FuseOverlay`, ...
@@ -156,7 +169,7 @@ average, 3-6 ms worst single frame. Before the optimizations a single walk was a
 Main menu (Campaign, Scenarios, Arcade, Multiplayer tabs), Settings (all six tabs), Logbook (Main,
 Parts, Abilities), Scenario details, Arcade event details, Customize, Customize Vehicle / Edit Vehicle,
 Customize Player Banner, Party panel, Quit and Exit dialogs, and in the campaign hub: Pause, Build, Map,
-Exit to Main Menu dialog, Hibi's Shop (garage) and its upgrade picker. Button-hint bars on all of these.
+Exit to Main Menu dialog, Hibi's Shop (garage) and its upgrade picker, vehicle select (Husky hub). Button-hint bars on all of these.
 Continue Campaign / Exit to Main Menu round trips (4x) without crashes. Logbook/Settings → Pause and
 gameplay → Pause recorded at 30 fps with no light frames.
 
